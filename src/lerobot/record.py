@@ -315,6 +315,7 @@ def record_loop(
 
     timestamp = 0
     start_episode_t = time.perf_counter()
+    last_log_t = 0.0
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
@@ -322,16 +323,23 @@ def record_loop(
             events["exit_early"] = False
             break
 
-        # Get robot observation
+        # ============================================================
+        # 观测阶段 (Observation Phase): 获取并处理机器人状态
+        # ============================================================
+        obs_start_t = time.perf_counter()
         obs = robot.get_observation()
 
-        # Applies a pipeline to the raw robot observation, default is IdentityProcessor
         obs_processed = robot_observation_processor(obs)
+        obs_end_t = time.perf_counter()
 
         if policy is not None or dataset is not None:
             observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix="observation")
 
-        # Get action from either policy or teleop
+        # ============================================================
+        # 推理阶段 (Inference Phase): 策略推理或示教获取动作
+        # ============================================================
+        inference_start_t = time.perf_counter()
+
         if policy is not None and preprocessor is not None and postprocessor is not None:
             action_values = predict_action(
                 observation=observation_frame,
@@ -348,12 +356,12 @@ def record_loop(
             act_processed_policy: RobotAction = {
                 f"{name}": float(action_values[i]) for i, name in enumerate(action_names)
             }
+            inference_end_t = time.perf_counter()
 
         elif policy is None and isinstance(teleop, Teleoperator):
             act = teleop.get_action()
-
-            # Applies a pipeline to the raw teleop action, default is IdentityProcessor
             act_processed_teleop = teleop_action_processor((act, obs))
+            inference_end_t = time.perf_counter()
 
         elif policy is None and isinstance(teleop, list):
             arm_action = teleop_arm.get_action()
@@ -362,6 +370,8 @@ def record_loop(
             base_action = robot._from_keyboard_to_base_action(keyboard_action)
             act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
             act_processed_teleop = teleop_action_processor((act, obs))
+            inference_end_t = time.perf_counter()
+
         else:
             logging.info(
                 "No policy or teleoperator provided, skipping action generation."
@@ -370,7 +380,11 @@ def record_loop(
             )
             continue
 
-        # Applies a pipeline to the action, default is IdentityProcessor
+        # ============================================================
+        # 动作阶段 (Action Phase): 处理并发送动作到机器人
+        # ============================================================
+        action_start_t = time.perf_counter()
+
         if policy is not None and act_processed_policy is not None:
             action_values = act_processed_policy
             robot_action_to_send = robot_action_processor((act_processed_policy, obs))
@@ -378,13 +392,8 @@ def record_loop(
             action_values = act_processed_teleop
             robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
 
-        # Send action to robot
-        # Action can eventually be clipped using `max_relative_target`,
-        # so action actually sent is saved in the dataset. action = postprocessor.process(action)
-        # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
         _sent_action = robot.send_action(robot_action_to_send)
 
-        # Write to dataset
         if dataset is not None:
             action_frame = build_dataset_frame(dataset.features, action_values, prefix="action")
             frame = {**observation_frame, **action_frame, "task": single_task}
@@ -392,11 +401,33 @@ def record_loop(
 
         if display_data:
             log_rerun_data(observation=obs_processed, action=action_values)
+        action_end_t = time.perf_counter()
 
+        # ============================================================
+        # 等待阶段 (Wait Phase): 等待以维持目标帧率
+        # ============================================================
+        wait_start_t = time.perf_counter()
         dt_s = time.perf_counter() - start_loop_t
         busy_wait(1 / fps - dt_s)
+        wait_end_t = time.perf_counter()
 
         timestamp = time.perf_counter() - start_episode_t
+
+        if timestamp - last_log_t >= 1.0:
+            total_loop_time = time.perf_counter() - start_loop_t
+            obs_time = obs_end_t - obs_start_t
+            inference_time = inference_end_t - inference_start_t
+            action_time = action_end_t - action_start_t
+            wait_time = wait_end_t - wait_start_t
+            logging.info(
+                f"[Record Loop] timestamp={timestamp:.1f}s | "
+                f"obs={obs_time*1000:.1f}ms | "
+                f"inference={inference_time*1000:.1f}ms | "
+                f"action={action_time*1000:.1f}ms | "
+                f"wait={wait_time*1000:.1f}ms | "
+                f"total={total_loop_time*1000:.1f}ms"
+            )
+            last_log_t = timestamp
 
 
 @parser.wrap()
