@@ -81,6 +81,7 @@ python -m lerobot.record \
 """
 
 import logging
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -508,8 +509,22 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
     with VideoEncodingManager(dataset):
         recorded_episodes = 0
+        TRACE_TIMES_FILE = os.path.expanduser("~/lerobot/syscall-analyze/.lerobot_trace_times.txt")
+
+        def write_trace_time(marker: str, timestamp: float):
+            try:
+                with open(TRACE_TIMES_FILE, "a") as f:
+                    f.write(f"{marker}|{timestamp}\n")
+                    f.flush()
+            except Exception:
+                pass
+
         while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
             log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
+
+            episode_start = time.perf_counter()
+            write_trace_time(f"episode_start|{episode_start}", episode_start)
+
             record_loop(
                 robot=robot,
                 events=events,
@@ -526,6 +541,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 single_task=cfg.dataset.single_task,
                 display_data=cfg.display_data,
             )
+            
+            episode_end = time.perf_counter()
+            write_trace_time(f"episode_end|{episode_end}", episode_end)
 
             # Execute a few seconds without recording to give time to manually reset the environment
             # Skip reset for the last episode to be recorded

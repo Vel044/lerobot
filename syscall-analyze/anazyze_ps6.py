@@ -4,7 +4,7 @@ import re
 import sys
 
 
-TRACE_TIMES_FILE = os.path.expanduser("~/.lerobot_trace_times.txt")
+TRACE_TIMES_FILE = os.path.expanduser("~/lerobot/syscall-analyze/.lerobot_trace_times.txt")
 
 
 def get_episode_time():

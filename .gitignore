@@ -91,6 +91,7 @@ celerybeat.pid
 # Trace files
 full_trace.txt
 *.trace
+.lerobot_trace_times.txt
 
 ### IDE & Editor Config ###
 # VS Code
