@@ -88,6 +88,10 @@ pip-delete-this-directory.txt
 celerybeat-schedule
 celerybeat.pid
 
+# Trace files
+full_trace.txt
+*.trace
+
 ### IDE & Editor Config ###
 # VS Code
 .vscode/
