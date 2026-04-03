@@ -1,0 +1,202 @@
+# Feetech SDK Read/Write Call Chain
+
+This note explains the `read` and `write` call chain used by LeRobot when controlling Feetech motors, with a focus on where time is actually spent.
+
+## Scope
+
+This document covers the path used by `SO101Follower` and similar robots built on top of `FeetechMotorsBus`.
+
+The two main operations are:
+
+- Reading joint state through `sync_read("Present_Position")`
+- Sending joint targets through `sync_write("Goal_Position", ...)`
+
+## High-Level Read Chain
+
+When LeRobot reads the current motor position, the call chain is:
+
+```text
+SO101Follower.get_observation()
+  -> FeetechMotorsBus.sync_read("Present_Position")
+  -> MotorsBus._sync_read(...)
+  -> scservo_sdk.GroupSyncRead.txRxPacket()
+  -> scservo_sdk.GroupSyncRead.txPacket()
+  -> scservo_sdk.PacketHandler.syncReadTx(...)
+  -> scservo_sdk.PacketHandler.txPacket(...)
+  -> port.writePort(...)
+  -> scservo_sdk.GroupSyncRead.rxPacket()
+  -> scservo_sdk.PacketHandler.readRx(...) for each motor id
+  -> scservo_sdk.PacketHandler.rxPacket(...)
+  -> port.readPort(...)
+```
+
+Relevant LeRobot entry points:
+
+- [so101_follower.py](/home/vel/lerobot/src/lerobot/robots/so101_follower/so101_follower.py#L249)
+- [motors_bus.py](/home/vel/lerobot/src/lerobot/motors/motors_bus.py#L1052)
+- [motors_bus.py](/home/vel/lerobot/src/lerobot/motors/motors_bus.py#L1100)
+- [feetech.py](/home/vel/lerobot/src/lerobot/motors/feetech/feetech.py#L133)
+- [feetech.py](/home/vel/lerobot/src/lerobot/motors/feetech/feetech.py#L134)
+
+Relevant SDK implementation:
+
+- [group_sync_read.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/group_sync_read.py#L76)
+- [protocol_packet_handler.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/protocol_packet_handler.py#L431)
+- [protocol_packet_handler.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/protocol_packet_handler.py#L262)
+- [protocol_packet_handler.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/protocol_packet_handler.py#L103)
+
+## High-Level Write Chain
+
+When LeRobot sends goal positions, the call chain is:
+
+```text
+SO101Follower.send_action()
+  -> FeetechMotorsBus.sync_write("Goal_Position", goal_pos)
+  -> MotorsBus._sync_write(...)
+  -> scservo_sdk.GroupSyncWrite.txPacket()
+  -> scservo_sdk.PacketHandler.syncWriteTxOnly(...)
+  -> scservo_sdk.PacketHandler.txRxPacket(...)
+  -> scservo_sdk.PacketHandler.txPacket(...)
+  -> port.writePort(...)
+  -> return immediately for broadcast id
+```
+
+Relevant LeRobot entry points:
+
+- [so101_follower.py](/home/vel/lerobot/src/lerobot/robots/so101_follower/so101_follower.py#L269)
+- [motors_bus.py](/home/vel/lerobot/src/lerobot/motors/motors_bus.py#L1193)
+- [motors_bus.py](/home/vel/lerobot/src/lerobot/motors/motors_bus.py#L1231)
+- [feetech.py](/home/vel/lerobot/src/lerobot/motors/feetech/feetech.py#L135)
+
+Relevant SDK implementation:
+
+- [group_sync_write.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/group_sync_write.py#L66)
+- [protocol_packet_handler.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/protocol_packet_handler.py#L450)
+- [protocol_packet_handler.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/protocol_packet_handler.py#L177)
+- [protocol_packet_handler.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/protocol_packet_handler.py#L69)
+
+## What Each SDK Layer Does
+
+### `GroupSyncRead.txRxPacket()`
+
+In [group_sync_read.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/group_sync_read.py#L76), `txRxPacket()` is split into two phases:
+
+```text
+txRxPacket()
+  -> txPacket()
+  -> rxPacket()
+```
+
+- `txPacket()` sends one broadcast sync-read request.
+- `rxPacket()` then loops over every target motor id and calls `ph.readRx(...)`.
+- That means a single sync read still waits for multiple status packets, one per motor.
+
+### `PacketHandler.syncReadTx()`
+
+In [protocol_packet_handler.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/protocol_packet_handler.py#L431), `syncReadTx()`:
+
+- builds the sync-read packet
+- calls `txPacket(...)`
+- sets timeout with `port.setPacketTimeout((6 + data_length) * param_length)`
+
+This stage mostly prepares the read and sends the request. It is not usually the main bottleneck.
+
+### `PacketHandler.readRx()` and `PacketHandler.rxPacket()`
+
+The important blocking read path is:
+
+```text
+readRx(...)
+  -> rxPacket(...)
+  -> port.readPort(...)
+```
+
+Relevant code:
+
+- [protocol_packet_handler.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/protocol_packet_handler.py#L262)
+- [protocol_packet_handler.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/protocol_packet_handler.py#L103)
+
+This is where most `sync_read` time is spent:
+
+- `rxPacket()` repeatedly calls `port.readPort(...)`
+- it waits until enough bytes arrive or timeout is reached
+- it parses headers and checks checksum
+- `GroupSyncRead.rxPacket()` repeats that for each motor id
+
+In practice, this means `sync_read` latency is dominated by waiting for status packets to come back from the motors over serial.
+
+### `GroupSyncWrite.txPacket()`
+
+In [group_sync_write.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/group_sync_write.py#L66), `txPacket()` only does:
+
+```text
+txPacket()
+  -> ph.syncWriteTxOnly(...)
+```
+
+This is fundamentally simpler than read:
+
+- it builds one group write payload
+- sends one packet
+- does not collect per-motor status packets
+
+### `PacketHandler.syncWriteTxOnly()`
+
+In [protocol_packet_handler.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/protocol_packet_handler.py#L450), `syncWriteTxOnly()` still calls `txRxPacket(...)`, but the packet id is broadcast:
+
+- [protocol_packet_handler.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/protocol_packet_handler.py#L454)
+- [protocol_packet_handler.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/protocol_packet_handler.py#L462)
+
+Then `txRxPacket()` returns early for broadcast id:
+
+- [protocol_packet_handler.py](/home/vel/miniconda3/envs/lerobot/lib/python3.10/site-packages/scservo_sdk/protocol_packet_handler.py#L186)
+
+So the write path is mostly:
+
+```text
+build packet -> writePort(...) -> return
+```
+
+That is why `sync_write` is usually faster than `sync_read`.
+
+## Where Time Is Typically Spent
+
+From the instrumentation added during debugging:
+
+- `bus._sync_read ... total=7.110ms (setup=0.011, txrx=7.073, unpack=0.023)`
+- `bus._sync_write ... total=5.061ms (setup=0.039, tx=5.017)`
+
+This tells us:
+
+- Python-side setup is negligible
+- value unpacking is negligible
+- the dominant cost is serial bus I/O inside SDK packet send/receive code
+
+## Why Read Is Often Slower Than Write
+
+`sync_read` is slower because it does more work on the bus:
+
+1. Send one broadcast read request
+2. Wait for multiple motor responses
+3. Parse and validate each response packet
+
+`sync_write` is simpler:
+
+1. Send one broadcast write packet
+2. Return without waiting for per-motor status packets
+
+So if control-loop latency is sensitive to a few milliseconds, `read` jitter is usually more noticeable than `write` jitter.
+
+## Practical Debugging Summary
+
+When you see these log fields:
+
+- `read state: X ms`
+- `send_action total=Y ms`
+
+the useful mental model is:
+
+- `read state` is mostly `port.readPort(...)` wait time inside the SDK receive path
+- `send_action` is mostly `port.writePort(...)` time inside the SDK transmit path
+
+The main user-space code in LeRobot is not the bottleneck here. The time is mostly spent after control enters the SDK's packet handler and serial port operations.

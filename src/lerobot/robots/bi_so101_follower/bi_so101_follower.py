@@ -130,26 +130,48 @@ class BiSO101Follower(Robot):
         self.right_arm.setup_motors()
 
     def get_observation(self) -> dict[str, Any]:
+        total_start = time.perf_counter()
         obs_dict = {}
 
         # Add "left_" prefix
+        left_start = time.perf_counter()
         left_obs = self.left_arm.get_observation()
+        left_hw_ms = (time.perf_counter() - left_start) * 1e3
+        left_prefix_start = time.perf_counter()
         obs_dict.update({f"left_{key}": value for key, value in left_obs.items()})
+        left_prefix_ms = (time.perf_counter() - left_prefix_start) * 1e3
 
         # Add "right_" prefix
+        right_start = time.perf_counter()
         right_obs = self.right_arm.get_observation()
+        right_hw_ms = (time.perf_counter() - right_start) * 1e3
+        right_prefix_start = time.perf_counter()
         obs_dict.update({f"right_{key}": value for key, value in right_obs.items()})
+        right_prefix_ms = (time.perf_counter() - right_prefix_start) * 1e3
+
+        cams_total_ms = 0.0
 
         for cam_key, cam in self.cameras.items():
             start = time.perf_counter()
             obs_dict[cam_key] = cam.async_read()
             dt_ms = (time.perf_counter() - start) * 1e3
+            cams_total_ms += dt_ms
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
+
+        total_ms = (time.perf_counter() - total_start) * 1e3
+        logger.debug(
+            f"{self} get_observation total={total_ms:.1f}ms "
+            f"(left_hw={left_hw_ms:.1f}, right_hw={right_hw_ms:.1f}, cams={cams_total_ms:.1f}, "
+            f"prefix_left={left_prefix_ms:.3f}, prefix_right={right_prefix_ms:.3f})"
+        )
 
         return obs_dict
 
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        total_start = time.perf_counter()
+
         # Remove "left_" prefix
+        split_start = time.perf_counter()
         left_action = {
             key.removeprefix("left_"): value for key, value in action.items() if key.startswith("left_")
         }
@@ -157,13 +179,27 @@ class BiSO101Follower(Robot):
         right_action = {
             key.removeprefix("right_"): value for key, value in action.items() if key.startswith("right_")
         }
+        split_ms = (time.perf_counter() - split_start) * 1e3
 
+        left_send_start = time.perf_counter()
         send_action_left = self.left_arm.send_action(left_action)
+        left_send_ms = (time.perf_counter() - left_send_start) * 1e3
+        right_send_start = time.perf_counter()
         send_action_right = self.right_arm.send_action(right_action)
+        right_send_ms = (time.perf_counter() - right_send_start) * 1e3
 
         # Add prefixes back
+        merge_start = time.perf_counter()
         prefixed_send_action_left = {f"left_{key}": value for key, value in send_action_left.items()}
         prefixed_send_action_right = {f"right_{key}": value for key, value in send_action_right.items()}
+        merge_ms = (time.perf_counter() - merge_start) * 1e3
+
+        total_ms = (time.perf_counter() - total_start) * 1e3
+        logger.debug(
+            f"{self} send_action total={total_ms:.1f}ms "
+            f"(split={split_ms:.3f}, left_send={left_send_ms:.1f}, right_send={right_send_ms:.1f}, "
+            f"merge={merge_ms:.3f})"
+        )
 
         return {**prefixed_send_action_left, **prefixed_send_action_right}
 

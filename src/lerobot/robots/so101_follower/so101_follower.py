@@ -247,52 +247,80 @@ class SO101Follower(Robot):
         return False, "No motors found on the bus, please connect the arm and press ENTER to try again."
 
     def get_observation(self) -> dict[str, Any]:
-        if not self.is_connected:
-            raise DeviceNotConnectedError(f"{self} is not connected.")
-
-        # Read arm position
-        start = time.perf_counter()
-        obs_dict = self.bus.sync_read("Present_Position")
-        obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items()}
-        dt_ms = (time.perf_counter() - start) * 1e3
-        logger.debug(f"{self} read state: {dt_ms:.1f}ms")
-
-        # Capture images from cameras
-        for cam_key, cam in self.cameras.items():
-            start = time.perf_counter()
-            obs_dict[cam_key] = cam.async_read()
-            dt_ms = (time.perf_counter() - start) * 1e3
-            logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
-
-        return obs_dict
-
-    def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
-        """Command arm to move to a target joint configuration.
-
-        The relative action magnitude may be clipped depending on the configuration parameter
-        `max_relative_target`. In this case, the action sent differs from original action.
-        Thus, this function always returns the action actually sent.
-
-        Raises:
-            RobotDeviceNotConnectedError: if robot is not connected.
-
+        """获取机器人的当前观测数据。
+        
+        该方法会读取所有电机的当前位置（作为本体感受数据），
+        并从所有已连接的相机捕获最新图像。
+        
         Returns:
-            the action sent to the motors, potentially clipped.
+            dict[str, Any]: 包含电机位置和相机图像的观测字典。
+                键格式为 '{motor_name}.pos' 和相机名称。
+        Raises:
+            DeviceNotConnectedError: 如果机器人未连接。
         """
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        goal_pos = {key.removesuffix(".pos"): val for key, val in action.items() if key.endswith(".pos")}
+        # 读取机械臂的当前位置
+        start = time.perf_counter()
+        obs_dict = self.bus.sync_read("Present_Position")
+        obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items()}
+        dt_ms = (time.perf_counter() - start) * 1e3
+        # logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
-        # Cap goal position when too far away from present position.
-        # /!\ Slower fps expected due to reading from the follower.
+        # 捕获相机图像
+        for cam_key, cam in self.cameras.items():
+            start = time.perf_counter()
+            obs_dict[cam_key] = cam.async_read()
+            dt_ms = (time.perf_counter() - start) * 1e3
+            # logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
+
+        return obs_dict
+
+    def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        """命令机械臂移动到目标关节配置。
+
+        根据配置参数 `max_relative_target`，相对动作幅度可能会被限制。
+        在这种情况下，实际发送的动作将不同于原始输入的动作。
+        因此，此函数始终返回实际发送给电机的动作。
+
+        Args:
+            action (dict[str, Any]): 目标动作字典，包含各电机的目标位置，
+                键的格式应为 '{motor_name}.pos'。
+
+        Raises:
+            DeviceNotConnectedError: 如果机器人未连接。
+
+        Returns:
+            dict[str, Any]: 实际发送给电机的动作字典（可能会被限制）。
+        """
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+
+        total_start = time.perf_counter()
+
+        goal_pos = {key.removesuffix(".pos"): val for key, val in action.items() if key.endswith(".pos")}
+        preprocess_ms = (time.perf_counter() - total_start) * 1e3
+
+        # 当目标位置离当前位置太远时，限制目标位置。
+        # /!\ 由于需要从跟随臂读取当前位置，预计会导致帧率（fps）下降。
+        read_ms = 0.0
         if self.config.max_relative_target is not None:
+            read_start = time.perf_counter()
             present_pos = self.bus.sync_read("Present_Position")
+            read_ms = (time.perf_counter() - read_start) * 1e3
             goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
             goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
 
-        # Send goal position to the arm
+        # 发送目标位置到机械臂
+        write_start = time.perf_counter()
         self.bus.sync_write("Goal_Position", goal_pos)
+        write_ms = (time.perf_counter() - write_start) * 1e3
+        total_ms = (time.perf_counter() - total_start) * 1e3
+        # logger.debug(
+        #     f"{self} send_action total={total_ms:.1f}ms "
+        #     f"(pre={preprocess_ms:.3f}, safety_read={read_ms:.1f}, write={write_ms:.1f})"
+        # )
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}
 
     def disconnect(self):

@@ -21,6 +21,7 @@
 
 import abc
 import logging
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -990,20 +991,18 @@ class MotorsBus(abc.ABC):
     def write(
         self, data_name: str, motor: str, value: Value, *, normalize: bool = True, num_retry: int = 0
     ) -> None:
-        """Write a value to a single motor's register.
+        """向单个电机的寄存器写入值。
 
-        Contrary to :pymeth:`sync_write`, this expects a response status packet emitted by the motor, which
-        provides a guarantee that the value was written to the register successfully. In consequence, it is
-        slower than :pymeth:`sync_write` but it is more reliable. It should typically be used when configuring
-        motors.
+        与 :pymeth:`sync_write` 相反，此方法期望电机发出响应状态数据包，
+        这保证了值已成功写入寄存器。因此，它比 :pymeth:`sync_write` 慢，
+        但更可靠。它通常应用于配置电机时。
 
         Args:
-            data_name (str): Register name.
-            motor (str): Motor name.
-            value (Value): Value to write.  If *normalize* is `True` the value is first converted to raw
-                units.
-            normalize (bool, optional): Enable or disable normalisation. Defaults to `True`.
-            num_retry (int, optional): Retry attempts.  Defaults to `0`.
+            data_name (str): 寄存器名称。
+            motor (str): 电机名称。
+            value (Value): 要写入的值。如果 *normalize* 为 `True`，该值将首先转换为原始单位。
+            normalize (bool, optional): 启用或禁用标准化。默认为 `True`。
+            num_retry (int, optional): 重试次数。默认为 `0`。
         """
         if not self.is_connected:
             raise DeviceNotConnectedError(
@@ -1074,28 +1073,33 @@ class MotorsBus(abc.ABC):
                 f"{self.__class__.__name__}('{self.port}') is not connected. You need to run `{self.__class__.__name__}.connect()`."
             )
 
+        # 1) 校验当前总线/协议是否支持 sync read。
         self._assert_protocol_is_compatible("sync_read")
 
+        # 2) 将用户传入的电机选择解析为具体的电机 id / model。
         names = self._get_motors_list(motors)
         ids = [self.motors[motor].id for motor in names]
         models = [self.motors[motor].model for motor in names]
 
+        # 3) 为目标电机解析寄存器地址和字节长度。
         if self._has_different_ctrl_tables:
             assert_same_address(self.model_ctrl_table, models, data_name)
 
         model = next(iter(models))
         addr, length = get_address(self.model_ctrl_table, model, data_name)
 
+        # 4) 执行总线读取，并对寄存器值做符号位解码。
         err_msg = f"Failed to sync read '{data_name}' on {ids=} after {num_retry + 1} tries."
         ids_values, _ = self._sync_read(
             addr, length, ids, num_retry=num_retry, raise_on_error=True, err_msg=err_msg
         )
-
         ids_values = self._decode_sign(data_name, ids_values)
 
+        # 5) 如有需要，将原始值转换回用户侧归一化范围。
         if normalize and data_name in self.normalized_data:
             ids_values = self._normalize(ids_values)
 
+        # 6) 按“电机名 -> 数值”返回（对外接口约定）。
         return {self._id_to_name(id_): value for id_, value in ids_values.items()}
 
     def _sync_read(
@@ -1108,20 +1112,61 @@ class MotorsBus(abc.ABC):
         raise_on_error: bool = True,
         err_msg: str = "",
     ) -> tuple[dict[int, int], int]:
+        """同步读取多个电机相同地址的数据。
+
+        该方法使用底层的 sync_reader 执行实际的读取操作。
+
+        Args:
+            addr (int): 寄存器地址。
+            length (int): 读取数据的字节长度。
+            motor_ids (list[int]): 目标电机 ID 列表。
+            num_retry (int, optional): 重试次数。默认为 0。
+            raise_on_error (bool, optional): 出错时是否抛出异常。默认为 True。
+            err_msg (str, optional): 出错时抛出的异常信息前缀。默认为空字符串。
+
+        Raises:
+            ConnectionError: 通信失败且 raise_on_error 为 True 时抛出。
+
+        Returns:
+            tuple[dict[int, int], int]: 返回一个元组，包含:
+                - dict[int, int]: 映射 *电机 ID -> 读取的值*。
+                - int: 通信结果状态码。
+        """
+        # A) 组装 GroupSyncRead 参数（地址、长度、目标 id 列表）。
+        t0 = time.perf_counter()
         self._setup_sync_reader(motor_ids, addr, length)
+        setup_ms = (time.perf_counter() - t0) * 1e3
+
+        # B) 执行总线收发（通常是主要耗时段）。rxtx
+        txrx_start = time.perf_counter()
         for n_try in range(1 + num_retry):
-            comm = self.sync_reader.txRxPacket()
+            comm = self.sync_reader.txRxPacket() # 最耗时
             if self._is_comm_success(comm):
                 break
             logger.debug(
                 f"Failed to sync read @{addr=} ({length=}) on {motor_ids=} ({n_try=}): "
                 + self.packet_handler.getTxRxResult(comm)
             )
+        txrx_ms = (time.perf_counter() - txrx_start) * 1e3
 
         if not self._is_comm_success(comm) and raise_on_error:
             raise ConnectionError(f"{err_msg} {self.packet_handler.getTxRxResult(comm)}")
 
+        # C) 从回包中提取各电机的寄存器值。
+        unpack_start = time.perf_counter()
         values = {id_: self.sync_reader.getData(id_, addr, length) for id_ in motor_ids}
+        unpack_ms = (time.perf_counter() - unpack_start) * 1e3
+        total_ms = (time.perf_counter() - t0) * 1e3
+        logger.debug(
+            "bus._sync_read addr=%s len=%s motors=%s total=%.3fms (setup=%.3f, txrx=%.3f, unpack=%.3f)",
+            addr,
+            length,
+            len(motor_ids),
+            total_ms,
+            setup_ms,
+            txrx_ms,
+            unpack_ms,
+        )
         return values, comm
 
     def _setup_sync_reader(self, motor_ids: list[int], addr: int, length: int) -> None:
@@ -1171,17 +1216,20 @@ class MotorsBus(abc.ABC):
                 f"{self.__class__.__name__}('{self.port}') is not connected. You need to run `{self.__class__.__name__}.connect()`."
             )
 
+        # 1) 将输入规整成 {motor_id: value}，并收集目标电机 model。
         ids_values = self._get_ids_values_dict(values)
         models = [self._id_to_model(id_) for id_ in ids_values]
+        # 2) 解析目标寄存器地址和字节长度。
         if self._has_different_ctrl_tables:
             assert_same_address(self.model_ctrl_table, models, data_name)
 
         model = next(iter(models))
         addr, length = get_address(self.model_ctrl_table, model, data_name)
 
+        # 3) 如有需要，将用户侧归一化数值反变换为寄存器原始单位。
         if normalize and data_name in self.normalized_data:
             ids_values = self._unnormalize(ids_values)
-
+        # 4) 做寄存器符号位编码后，下发到总线。
         ids_values = self._encode_sign(data_name, ids_values)
 
         err_msg = f"Failed to sync write '{data_name}' with {ids_values=} after {num_retry + 1} tries."
@@ -1196,18 +1244,36 @@ class MotorsBus(abc.ABC):
         raise_on_error: bool = True,
         err_msg: str = "",
     ) -> int:
+        # A) 组装 GroupSyncWrite 载荷。
+        t0 = time.perf_counter()
         self._setup_sync_writer(ids_values, addr, length)
+        setup_ms = (time.perf_counter() - t0) * 1e3
+
+        # B) 在总线上发送数据包（通常是主要耗时段）。tx_ms
+        tx_start = time.perf_counter()
         for n_try in range(1 + num_retry):
-            comm = self.sync_writer.txPacket()
+            comm = self.sync_writer.txPacket()     # 最耗时
             if self._is_comm_success(comm):
                 break
             logger.debug(
                 f"Failed to sync write @{addr=} ({length=}) with {ids_values=} ({n_try=}): "
                 + self.packet_handler.getTxRxResult(comm)
             )
+        tx_ms = (time.perf_counter() - tx_start) * 1e3
 
         if not self._is_comm_success(comm) and raise_on_error:
             raise ConnectionError(f"{err_msg} {self.packet_handler.getTxRxResult(comm)}")
+
+        total_ms = (time.perf_counter() - t0) * 1e3
+        logger.debug(
+            "bus._sync_write addr=%s len=%s motors=%s total=%.3fms (setup=%.3f, tx=%.3f)",
+            addr,
+            length,
+            len(ids_values),
+            total_ms,
+            setup_ms,
+            tx_ms,
+        )
 
         return comm
 

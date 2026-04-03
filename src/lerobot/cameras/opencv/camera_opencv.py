@@ -336,7 +336,7 @@ class OpenCVCamera(Camera):
         processed_frame = self._postprocess_image(frame, color_mode)
 
         read_duration_ms = (time.perf_counter() - start_time) * 1e3
-        logger.debug(f"{self} read took: {read_duration_ms:.1f}ms")
+        # logger.debug(f"{self} read took: {read_duration_ms:.1f}ms")
 
         return processed_frame
 
@@ -457,12 +457,15 @@ class OpenCVCamera(Camera):
         if self.thread is None or not self.thread.is_alive():
             self._start_read_thread()
 
+        wait_start = time.perf_counter()
+        has_cached_frame = self.latest_frame is not None
         if not self.new_frame_event.wait(timeout=timeout_ms / 1000.0):
             thread_alive = self.thread is not None and self.thread.is_alive()
             raise TimeoutError(
                 f"Timed out waiting for frame from camera {self} after {timeout_ms} ms. "
                 f"Read thread alive: {thread_alive}."
             )
+        wait_ms = (time.perf_counter() - wait_start) * 1e3
 
         with self.frame_lock:
             frame = self.latest_frame
@@ -470,6 +473,12 @@ class OpenCVCamera(Camera):
 
         if frame is None:
             raise RuntimeError(f"Internal error: Event set but no frame available for {self}.")
+
+        # Main-thread blocking signal: if this is close to frame period (e.g. ~33ms at 30fps),
+        # the control loop is waiting on camera producer cadence.
+        # logger.debug(
+        #     f"{self} async_read wait={wait_ms:.1f}ms (cached_before_wait={has_cached_frame})"
+        # )
 
         return frame
 

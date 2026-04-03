@@ -66,6 +66,8 @@
     title: Notebooks
   - local: feetech
     title: Updating Feetech Firmware
+  - local: feetech_sdk_call_chain
+    title: Feetech SDK Read/Write Chain
   title: "Resources"
 - sections:
   - local: contributing

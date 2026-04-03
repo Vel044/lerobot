@@ -258,6 +258,7 @@ class RecordConfig:
 """
 
 
+
 @safe_stop_image_writer
 def record_loop(
     robot: Robot,
@@ -325,23 +326,45 @@ def record_loop(
             break
 
         # ============================================================
-        # 观测阶段 (Observation Phase): 获取并处理机器人状态
+        # 观测阶段 (Observation)
+        # 输入: 机器人当前真实状态
+        # 处理: 读取硬件观测 -> 做观测后处理 -> 必要时打包成 observation_frame
+        # 输出: obs / obs_processed / observation_frame
+        # 计时: obs = 读硬件 + 观测后处理
         # ============================================================
         obs_start_t = time.perf_counter()
-        obs = robot.get_observation()
 
+        # 直接从机器人采集原始观测, 例如关节位置、相机图像。
+        obs_hw_start_t = time.perf_counter()
+        obs = robot.get_observation()
+        obs_hw_end_t = time.perf_counter()
+
+        # 将原始观测整理成统一格式, 供数据记录和策略推理复用。
+        obs_process_start_t = time.perf_counter()
         obs_processed = robot_observation_processor(obs)
+        obs_process_end_t = time.perf_counter()
         obs_end_t = time.perf_counter()
 
         if policy is not None or dataset is not None:
+            # 将处理后的观测按数据集特征定义打包成 observation frame。
+            obs_frame_start_t = time.perf_counter()
             observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix="observation")
+            obs_frame_end_t = time.perf_counter()
+        else:
+            obs_frame_start_t = obs_frame_end_t = obs_end_t
 
         # ============================================================
-        # 推理阶段 (Inference Phase): 策略推理或示教获取动作
+        # 推理阶段 (Inference)
+        # 输入: 当前时刻观测 observation_frame / obs
+        # 处理: policy 推理或 teleop 取动作
+        # 输出: act_processed_policy 或 act_processed_teleop
+        # 计时: inference = 完整动作生成流程, 不只是模型前向
         # ============================================================
         inference_start_t = time.perf_counter()
 
         if policy is not None and preprocessor is not None and postprocessor is not None:
+            # policy 路径: 输入当前 observation_frame, 内部会做 tensor 转换、预处理、
+            # policy.select_action() 和后处理, 返回当前步动作。
             action_values = predict_action(
                 observation=observation_frame,
                 policy=policy,
@@ -353,6 +376,7 @@ def record_loop(
                 robot_type=robot.robot_type,
             )
 
+            # 将按索引排列的动作张量转成 {action_name: float} 字典, 便于后续机器人接口消费。
             action_names = dataset.features["action"]["names"]
             act_processed_policy: RobotAction = {
                 f"{name}": float(action_values[i]) for i, name in enumerate(action_names)
@@ -360,16 +384,24 @@ def record_loop(
             inference_end_t = time.perf_counter()
 
         elif policy is None and isinstance(teleop, Teleoperator):
+            # 单个 teleop 路径: 直接从示教设备取动作, 不经过模型推理。
             act = teleop.get_action()
+
+            # 对 teleop 动作做统一处理, 输出与机器人动作接口兼容的结构。
             act_processed_teleop = teleop_action_processor((act, obs))
             inference_end_t = time.perf_counter()
 
         elif policy is None and isinstance(teleop, list):
+            # 多输入 teleop 路径: 分别读取机械臂和键盘动作。
             arm_action = teleop_arm.get_action()
             arm_action = {f"arm_{k}": v for k, v in arm_action.items()}
             keyboard_action = teleop_keyboard.get_action()
+
+            # 将键盘输入转换为底盘动作, 再与机械臂动作合并成统一动作字典。
             base_action = robot._from_keyboard_to_base_action(keyboard_action)
             act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
+
+            # 对合并后的 teleop 动作做统一处理。
             act_processed_teleop = teleop_action_processor((act, obs))
             inference_end_t = time.perf_counter()
 
@@ -382,26 +414,48 @@ def record_loop(
             continue
 
         # ============================================================
-        # 动作阶段 (Action Phase): 处理并发送动作到机器人
+        # 动作阶段 (Action)
+        # 输入: 上一阶段生成的动作
+        # 处理: 动作格式转换 -> 下发到机器人 -> 必要时写入数据集/可视化
+        # 输出: 机器人开始执行本轮动作
+        # 计时: action = 动作后处理 + send_action + add_frame
         # ============================================================
         action_start_t = time.perf_counter()
 
+        action_process_start_t = time.perf_counter()
         if policy is not None and act_processed_policy is not None:
+            # policy 输出动作继续沿用, 并转换成机器人 send_action 所需的字段格式。
             action_values = act_processed_policy
             robot_action_to_send = robot_action_processor((act_processed_policy, obs))
         else:
+            # teleop 输出动作继续沿用, 同样转换成机器人接口期望的格式。
             action_values = act_processed_teleop
             robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+        action_process_end_t = time.perf_counter()
 
+        # 真正向机器人下发动作。
+        # 注意: 某些机器人实现内部可能会先读当前位置再做安全限幅, 所以这里不只是“写串口”。
+        send_action_start_t = time.perf_counter()
         _sent_action = robot.send_action(robot_action_to_send)
+        send_action_end_t = time.perf_counter()
 
         if dataset is not None:
+            # 将本轮动作按数据集特征定义打包, 与 observation frame 合并后写入数据集。
+            dataset_frame_start_t = time.perf_counter()
             action_frame = build_dataset_frame(dataset.features, action_values, prefix="action")
             frame = {**observation_frame, **action_frame, "task": single_task}
             dataset.add_frame(frame)
+            dataset_frame_end_t = time.perf_counter()
+        else:
+            dataset_frame_start_t = dataset_frame_end_t = send_action_end_t
 
         if display_data:
+            # 将观测和动作同步送到可视化通道。
+            display_start_t = time.perf_counter()
             log_rerun_data(observation=obs_processed, action=action_values)
+            display_end_t = time.perf_counter()
+        else:
+            display_start_t = display_end_t = dataset_frame_end_t
         action_end_t = time.perf_counter()
 
         # ============================================================
@@ -417,23 +471,34 @@ def record_loop(
         if timestamp - last_log_t >= 1.0:
             total_loop_time = time.perf_counter() - start_loop_t
             obs_time = obs_end_t - obs_start_t
+            obs_hw_time = obs_hw_end_t - obs_hw_start_t
+            obs_process_time = obs_process_end_t - obs_process_start_t
+            obs_frame_time = obs_frame_end_t - obs_frame_start_t
             inference_time = inference_end_t - inference_start_t
             action_time = action_end_t - action_start_t
+            action_process_time = action_process_end_t - action_process_start_t
+            send_action_time = send_action_end_t - send_action_start_t
+            dataset_frame_time = dataset_frame_end_t - dataset_frame_start_t
+            display_time = display_end_t - display_start_t
             wait_time = wait_end_t - wait_start_t
             logging.info(
                 f"[Record Loop] timestamp={timestamp:.1f}s | "
                 f"obs={obs_time*1000:.1f}ms | "
+                # f"(hw={obs_hw_time*1000:.1f}, proc={obs_process_time*1000:.1f}, frame={obs_frame_time*1000:.1f}) | "
                 f"inference={inference_time*1000:.1f}ms | "
                 f"action={action_time*1000:.1f}ms | "
-                f"wait={wait_time*1000:.1f}ms | "
-                f"total={total_loop_time*1000:.1f}ms"
+                # f"(proc={action_process_time*1000:.1f}, send={send_action_time*1000:.1f}, "
+                # f"dataset={dataset_frame_time*1000:.1f}, display={display_time*1000:.1f}) | "
+                # f"wait={wait_time*1000:.1f}ms | "
+                f"total={total_loop_time*1000:.1f}ms |"
+                f"fps={1/total_loop_time:.1f}"
             )
             last_log_t = timestamp
 
 
 @parser.wrap()
 def record(cfg: RecordConfig) -> LeRobotDataset:
-    init_logging()
+    init_logging(console_level="DEBUG")
     logging.info(pformat(asdict(cfg)))
     if cfg.display_data:
         _init_rerun(session_name="recording")
