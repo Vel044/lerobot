@@ -19,11 +19,14 @@ permissions:
   pull-requests: write
 
 on:
-  # Triggered by the completion of the main 'Documentation' workflow.
-  # workflow_run: # zizmor: ignore[dangerous-triggers] We follow the same pattern as in Transformers
-  #   workflows: ["Documentation"]
-  #   types:
-  #     - completed
+  # Disabled - workflow_run trigger commented out to prevent unwanted runs
+  workflow_dispatch:
+
+# Triggered by the completion of the main 'Documentation' workflow.
+# workflow_run: # zizmor: ignore[dangerous-triggers]
+#   workflows: ["Documentation"]
+#   types:
+#     - completed
 
 jobs:
   # This job uploads a preview of the documentation for a pull request.
