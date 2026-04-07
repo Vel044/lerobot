@@ -18,6 +18,7 @@
 
 
 import logging
+import time
 import traceback
 from contextlib import nullcontext
 from copy import copy
@@ -155,6 +156,25 @@ def predict_action(
     Returns:
         A `torch.Tensor` containing the predicted action, ready for the robot.
     """
+    # Fast path: when policy has cached actions in queue, skip expensive observation processing.
+    # This benefits all policies that use action chunking/queueing:
+    # - ACT: _action_queue (deque)
+    # - Diffusion: _queues["action"] (deque)
+    # - PI0: _action_queue (deque)
+    # - PI0Fast: _action_queue (deque)
+    # - SmolVLA: _queues (deque)
+    # - TDMPC: _action_queue (deque)
+    # - VQBeT: _action_queue (deque)
+    from lerobot.constants import ACTION
+    if hasattr(policy, "_action_queue") and len(policy._action_queue) > 0:
+        action = policy._action_queue.popleft()
+        action = postprocessor(action)
+        return action.squeeze(0).to("cpu")
+    if hasattr(policy, "_queues") and len(policy._queues.get(ACTION, [])) > 0:
+        action = policy._queues[ACTION].popleft()
+        action = postprocessor(action)
+        return action.squeeze(0).to("cpu")
+
     observation = copy(observation)
     with (
         torch.inference_mode(),
