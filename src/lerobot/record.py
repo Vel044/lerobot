@@ -318,8 +318,6 @@ def record_loop(
     timestamp = 0
     start_episode_t = time.perf_counter()
     last_log_t = 0.0
-    total_wait_time = 0.0
-    wait_frame_count = 0
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
@@ -483,8 +481,6 @@ def record_loop(
             dataset_frame_time = dataset_frame_end_t - dataset_frame_start_t
             display_time = display_end_t - display_start_t
             wait_time = wait_end_t - wait_start_t
-            total_wait_time += wait_time
-            wait_frame_count += 1
             logging.info(
                 f"[Record Loop] timestamp={timestamp:.1f}s | "
                 f"obs={obs_time*1000:.1f}ms | "
@@ -493,7 +489,7 @@ def record_loop(
                 f"action={action_time*1000:.1f}ms | "
                 # f"(proc={action_process_time*1000:.1f}, send={send_action_time*1000:.1f}, "
                 # f"dataset={dataset_frame_time*1000:.1f}, display={display_time*1000:.1f}) | "
-                    f"wait={wait_time*1000:.1f}ms (avg={total_wait_time*1000/max(wait_frame_count,1):.1f}ms) | "
+                    f"wait={wait_time*1000:.1f}ms | "
                 f"total={total_loop_time*1000:.1f}ms |"
                 f"fps={1/total_loop_time:.1f}"
             )
