@@ -1728,6 +1728,29 @@ class MotorsBus(abc.ABC):
         for id_ in motor_ids:
             self.sync_reader.addParam(id_)
 
+    # TODO(aliberts, pkooij): Implementing something like this could get even much faster read times if need be.
+    # Would have to handle the logic of checking if a packet has been sent previously though but doable.
+    # This could be at the cost of increase latency between the moment the data is produced by the motors and
+    # the moment it is used by a policy.
+    # def _async_read(self, motor_ids: list[int], address: int, length: int):
+    #     if self.sync_reader.start_address != address or self.sync_reader.data_length != length or ...:
+    #         self._setup_sync_reader(motor_ids, address, length)
+    #     else:
+    #         self.sync_reader.rxPacket()
+    #         self.sync_reader.txPacket()
+    #
+    #     for id_ in motor_ids:
+    #         value = self.sync_reader.getData(id_, address, length)
+    #
+    # 说明（来自上游 huggingface/lerobot 的占位注释，同步到本 fork）：
+    #   - 上游在此处留有"异步读"的远期规划，采用流水线（pipelining）方式：
+    #     把 `txRxPacket()`（发请求+等回包，阻塞）拆成先 `rxPacket()` 收上一轮的数据、
+    #     再 `txPacket()` 发下一轮请求。主线程读到的是"上一帧"的电机状态。
+    #   - 没有后台线程、没有锁，只是把串口往返通信延迟隐藏到两次调用之间。
+    #   - 代价：policy 使用的观测比实际产生时刻晚 1 帧（strict causality 受影响）。
+    #   - 注意：此占位只针对 read。`sync_write` 侧**没有**对应的异步化规划，原因见
+    #     robotdoc/Analysis/motors_bus_异步读写设计分析.md
+
     def sync_write(
         self,
         data_name: str,
