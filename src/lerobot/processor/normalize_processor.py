@@ -250,13 +250,19 @@ class _NormalizationMixin:
         Returns:
             A new observation dictionary with the transformed tensor values.
         """
+        # 浅拷贝输入 dict，避免污染外层 observation；value 仍指向原 Tensor，后面按 key 覆盖
+        # ACT 在树莓派上的典型 observation 包含：observation.state (6,) + observation.images.* (1,3,H,W)
         new_observation = dict(observation)
+        # 遍历 config 里声明过的所有 feature；key 是字段名，feature.type ∈ {STATE, VISUAL, ACTION, ...}
         for key, feature in self.features.items():
+            # normalize_observation_keys 是可选白名单；ACT 默认为 None → 全部都要归一化
             if self.normalize_observation_keys is not None and key not in self.normalize_observation_keys:
                 continue
+            # 只处理观测侧字段（排除 ACTION，它由 _normalize_action 单独走）；且当前 observation 里确实有该 key
             if feature.type != FeatureType.ACTION and key in new_observation:
-                # Convert to tensor but preserve original dtype for adaptation logic
+                # 统一转成 Tensor（state 是 float32 向量 / 图像是 uint8 或 float32 张量），dtype 先按输入保留
                 tensor = torch.as_tensor(new_observation[key])
+                # 调用核心变换；按 feature.type 查 norm_map 选模式，ACT 三路均为 MEAN_STD
                 new_observation[key] = self._apply_transform(tensor, key, feature.type, inverse=inverse)
         return new_observation
 
@@ -272,6 +278,9 @@ class _NormalizationMixin:
         Returns:
             The transformed action tensor.
         """
+        # action 形状：推理时是 (B=1, action_dim=6) —— 6 个 Feetech 舵机目标角度
+        # 训练时是 (B, chunk_size=100, 6) —— ACT 一次预测 100 步
+        # key 固定写死 "action"，norm_map[ACTION] = MEAN_STD，所以统一走 (x-μ)/σ 或 x*σ+μ
         processed_action = self._apply_transform(action, "action", FeatureType.ACTION, inverse=inverse)
         return processed_action
 
@@ -296,29 +305,38 @@ class _NormalizationMixin:
         Raises:
             ValueError: If an unsupported normalization mode is encountered.
         """
+        # 根据 feature_type 查归一化模式；ACT 配置里 VISUAL/STATE/ACTION 全部映射到 MEAN_STD
         norm_mode = self.norm_map.get(feature_type, NormalizationMode.IDENTITY)
+        # 两种跳过：模式是 IDENTITY（不归一化），或 stats 里根本没这个字段的统计量（如语言 token）
         if norm_mode == NormalizationMode.IDENTITY or key not in self._tensor_stats:
             return tensor
 
         if norm_mode not in (NormalizationMode.MEAN_STD, NormalizationMode.MIN_MAX):
             raise ValueError(f"Unsupported normalization mode: {norm_mode}")
 
-        # For Accelerate compatibility: Ensure stats are on the same device and dtype as the input tensor
+        # 兜底对齐 device / dtype：树莓派推理时 tensor 在 cpu/float32，stats 初始化时也应在 cpu，
+        # 正常不会触发；但 GPU 训练时 tensor 可能是 fp16/cuda，这里按需把 stats 搬过去
         if self._tensor_stats and key in self._tensor_stats:
             first_stat = next(iter(self._tensor_stats[key].values()))
             if first_stat.device != tensor.device or first_stat.dtype != tensor.dtype:
                 self.to(device=tensor.device, dtype=tensor.dtype)
 
+        # stats 结构：{"mean": Tensor(shape同feature), "std": Tensor(...), "min":..., "max":...}
+        # 对 state/action 是 shape=(6,)，对图像是 shape=(3,1,1) 按通道广播
         stats = self._tensor_stats[key]
 
+        # ── ACT 实际走这个分支 ─────────────────────────────────────────
         if norm_mode == NormalizationMode.MEAN_STD and "mean" in stats and "std" in stats:
             mean, std = stats["mean"], stats["std"]
-            # Avoid division by zero by adding a small epsilon.
+            # eps=1e-8 防止某维 std≈0 时除零爆炸（比如某关节训练集里几乎不动）
             denom = std + self.eps
             if inverse:
+                # 反归一化（后处理）：把模型输出从 0 均值 1 方差的无量纲数 → 真实舵机角度（度）
                 return tensor * std + mean
+            # 归一化（预处理）：真实角度/像素 → 0 均值 1 方差，ResNet18 和 Transformer 期望这种尺度
             return (tensor - mean) / denom
 
+        # ── 下面 MIN_MAX 分支 ACT 不走；Diffusion/pi0 等策略才会用 ───
         if norm_mode == NormalizationMode.MIN_MAX and "min" in stats and "max" in stats:
             min_val, max_val = stats["min"], stats["max"]
             denom = max_val - min_val
@@ -384,21 +402,28 @@ class NormalizerProcessorStep(_NormalizationMixin, ProcessorStep):
         )
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
+        # 预处理流水线第 4 步：由 PolicyProcessorPipeline._forward 驱动调用（pipeline.py:306-316）
+        # transition 是 dict-like：{OBSERVATION: {...}, ACTION: Tensor|None, REWARD:..., ...}
+        # 浅拷贝避免改到调用方持有的 dict
         new_transition = transition.copy()
 
-        # Handle observation normalization.
+        # ── 观测侧 ─────────────────────────────────────────
+        # ACT 推理路径上 observation 总是非 None，包含 state 向量 + 若干路图像
         observation = new_transition.get(TransitionKey.OBSERVATION)
         if observation is not None:
+            # inverse=False → 做正向归一化 (x - μ) / σ
             new_transition[TransitionKey.OBSERVATION] = self._normalize_observation(
                 observation, inverse=False
             )
 
-        # Handle action normalization.
+        # ── 动作侧 ─────────────────────────────────────────
+        # 推理阶段 transition 里通常没有 ACTION（policy 还没产出），会得到None，直接 return
         action = new_transition.get(TransitionKey.ACTION)
 
         if action is None:
             return new_transition
 
+        # 训练时 transition 会带 action 标签（ground truth），需要归一化后再算 L1 loss
         if not isinstance(action, PolicyAction):
             raise ValueError(f"Action should be a PolicyAction type got {type(action)}")
 
@@ -448,14 +473,18 @@ class UnnormalizerProcessorStep(_NormalizationMixin, ProcessorStep):
         return cls(features=features, norm_map=norm_map, stats=dataset.meta.stats, device=device)
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
+        # 后处理流水线第 1 步：ACT 推理时由 policy_action_to_transition 把 (1,6) 动作包进 transition 里喂进来
+        # 目的：把模型输出的归一化动作 → 真实物理单位（Feetech 舵机角度，单位度）
         new_transition = transition.copy()
 
-        # Handle observation unnormalization.
+        # ── 观测侧反归一化 ─────────────────────────────────
+        # ACT 后处理通常 observation=None（只处理 action）；保留分支是为了兼容其他策略如 SAC/RL 评估
         observation = new_transition.get(TransitionKey.OBSERVATION)
         if observation is not None:
             new_transition[TransitionKey.OBSERVATION] = self._normalize_observation(observation, inverse=True)
 
-        # Handle action unnormalization.
+        # ── 动作侧反归一化 ─────────────────────────────────
+        # action: Tensor (1,6)，device=config.device（树莓派上 = "cpu"）
         action = new_transition.get(TransitionKey.ACTION)
 
         if action is None:
@@ -463,6 +492,7 @@ class UnnormalizerProcessorStep(_NormalizationMixin, ProcessorStep):
         if not isinstance(action, PolicyAction):
             raise ValueError(f"Action should be a PolicyAction type got {type(action)}")
 
+        # inverse=True → 执行 action * σ_action + μ_action，还原成舵机目标角度
         new_transition[TransitionKey.ACTION] = self._normalize_action(action, inverse=True)
 
         return new_transition

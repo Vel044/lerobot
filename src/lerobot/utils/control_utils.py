@@ -156,54 +156,72 @@ def predict_action(
     Returns:
         A `torch.Tensor` containing the predicted action, ready for the robot.
     """
-    # Fast path: when policy has cached actions in queue, skip expensive observation processing.
-    # This benefits all policies that use action chunking/queueing:
+    # ── 快速路径：动作分块缓存（Action Chunking）──────────────────────────
+    # ACT/Diffusion/PI0 等策略每次推理产出一整段动作序列（chunk），
+    # 缓存在队列里逐步取用，避免每帧都跑一次完整推理（推理很慢）。
+    # 支持的策略及其队列属性：
     # - ACT: _action_queue (deque)
     # - Diffusion: _queues["action"] (deque)
-    # - PI0: _action_queue (deque)
-    # - PI0Fast: _action_queue (deque)
+    # - PI0 / PI0Fast: _action_queue (deque)
     # - SmolVLA: _queues (deque)
-    # - TDMPC: _action_queue (deque)
-    # - VQBeT: _action_queue (deque)
+    # - TDMPC / VQBeT: _action_queue (deque)
     from lerobot.constants import ACTION
     if hasattr(policy, "_action_queue") and len(policy._action_queue) > 0:
+        # 队列非空：直接弹出下一帧动作，跳过观测处理和模型推理
+        # action: Tensor (1, action_dim)，即上一次推理缓存的第 i 帧
         action = policy._action_queue.popleft()
-        action = postprocessor(action)
-        return action.squeeze(0).to("cpu")
+        action = postprocessor(action)                  # 反归一化到真实关节角度范围
+        return action.squeeze(0).to("cpu")              # 去掉 batch 维 → (action_dim,)
     if hasattr(policy, "_queues") and len(policy._queues.get(ACTION, [])) > 0:
+        # 同上，用于 _queues 字典格式的策略（SmolVLA 等）
         action = policy._queues[ACTION].popleft()
         action = postprocessor(action)
         return action.squeeze(0).to("cpu")
 
-    observation = copy(observation)
+    # ── 完整推理路径：无缓存时执行 ─────────────────────────────────────────
+    observation = copy(observation)                     # 浅拷贝，避免修改原始 obs dict
     with (
-        torch.inference_mode(),
+        torch.inference_mode(),                         # 关闭梯度计算，节省内存和时间
         torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
+        # use_amp=True 时开启混合精度（FP16），加速 CUDA 推理；树莓派 CPU 上不生效
     ):
-        # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
+        # ── 预处理：numpy → PyTorch Tensor，格式转换 ──────────────────────
         for name in observation:
+            # observation[name]: np.ndarray，形状视传感器类型而定
             observation[name] = torch.from_numpy(observation[name])
             if "image" in name:
+                # 图像原始格式: (H, W, C) uint8 [0,255]（OpenCV/摄像头输出）
                 observation[name] = observation[name].type(torch.float32) / 255
+                # permute: (H, W, C) → (C, H, W)，PyTorch 要求 channel-first
                 observation[name] = observation[name].permute(2, 0, 1).contiguous()
+            # unsqueeze(0): 加 batch 维 → (1, ...) 满足模型输入要求
             observation[name] = observation[name].unsqueeze(0)
-            observation[name] = observation[name].to(device)
+            observation[name] = observation[name].to(device)  # 移到推理设备（cpu/cuda）
 
+        # 附加任务描述和机器人类型（语言条件策略如 SmolVLA/PI0 会用到）
         observation["task"] = task if task else ""
         observation["robot_type"] = robot_type if robot_type else ""
 
+        # ── 运行预处理流水线（归一化、特征提取等）────────────────────────
+        # preprocessor: PolicyProcessorPipeline，输入 dict[str, Any]，输出 dict[str, Any]
         observation = preprocessor(observation)
 
-        # Compute the next action with the policy
-        # based on the current observation
+        # ── 模型推理：输入观测，输出动作 chunk ────────────────────────────
+        # select_action 内部：
+        #   1. 编码图像和状态 → Encoder tokens
+        #   2. Transformer Encoder + Decoder 融合信息
+        #   3. 输出 chunk_size 帧动作序列，缓存到 _action_queue，返回第 0 帧
+        # action: Tensor (1, action_dim)，归一化空间的关节角度增量或绝对值
         action = policy.select_action(observation)
 
+        # ── 后处理：反归一化回真实物理单位 ───────────────────────────────
+        # postprocessor: PolicyProcessorPipeline，将 [-1,1] 范围映射回实际角度（度/弧度）
         action = postprocessor(action)
 
-        # Remove batch dimension
+        # 去掉 batch 维: (1, action_dim) → (action_dim,)
         action = action.squeeze(0)
 
-        # Move to cpu, if not already the case
+        # 移回 CPU：机器人控制代码在 CPU 上运行（树莓派无 GPU）
         action = action.to("cpu")
 
     return action
