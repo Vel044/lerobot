@@ -37,7 +37,7 @@ import draccus
 import grpc
 import torch
 
-from lerobot.policies.factory import get_policy_class
+from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 from lerobot.scripts.server.configs import PolicyServerConfig
 from lerobot.scripts.server.constants import SUPPORTED_POLICIES
 from lerobot.scripts.server.helpers import (
@@ -206,6 +206,21 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         end = time.perf_counter()
 
         self.logger.info(f"Time taken to put policy on {self.device}: {end - start:.4f} seconds")
+
+        # 加载预处理器和后处理器（含归一化/反归一化）
+        # 这一步至关重要：preprocessor 包含 NormalizerProcessorStep（用数据集统计归一化观测），
+        # postprocessor 包含 UnnormalizerProcessorStep（将模型输出反归一化回物理角度）
+        # 不加载这些会导致模型收到未归一化的输入，输出也未反归一化的动作
+        start = time.perf_counter()
+        self.preprocessor, self.postprocessor = make_pre_post_processors(
+            policy_cfg=self.policy.config,
+            pretrained_path=policy_specs.pretrained_name_or_path,
+            preprocessor_overrides={
+                "device_processor": {"device": self.device},
+            },
+        )
+        end = time.perf_counter()
+        self.logger.info(f"Time taken to load pre/post processors: {end - start:.4f} seconds")
 
         return services_pb2.Empty()
 
@@ -503,15 +518,23 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         """
         inference_starts = time.perf_counter()
 
-        """1. Prepare observation"""
+        """1. Prepare observation (键名映射 + 图像缩放)"""
         start_time = time.perf_counter()
         observation = self._prepare_observation(observation_t)
-        preprocessing_time = time.perf_counter() - start_time
+        prep_raw_time = time.perf_counter() - start_time
+
+        """1b. Apply preprocessor (归一化: 用数据集统计信息标准化观测值)"""
+        # 这一步把原始观测值转换为模型训练时用的归一化空间
+        # 例如：关节角度 [-180, 180] → 归一化值 [-2, 2]
+        start_time = time.perf_counter()
+        observation = self.preprocessor(observation)
+        prep_norm_time = time.perf_counter() - start_time
+        preprocessing_time = time.perf_counter() - inference_starts
 
         # 更新 last_processed_obs，后续观测会跟它做 similarity 检查
         self.last_processed_obs: TimedObservation = observation_t
 
-        """2. Get action chunk"""
+        """2. Get action chunk (模型推理)"""
         start_time = time.perf_counter()
         action_tensor = self._get_action_chunk(observation)
         inference_time = time.perf_counter() - start_time
@@ -519,15 +542,24 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         """3. Post-inference processing"""
         start_time = time.perf_counter()
         # action_tensor: (1, actions_per_chunk, action_dim) → squeeze(0) → (actions_per_chunk, action_dim)
-        # 移到 CPU 再序列化（pickle 不支持 CUDA tensor）
-        action_tensor = action_tensor.cpu().squeeze(0)
+        action_tensor = action_tensor.squeeze(0)
+
+        # 3b. Apply postprocessor (反归一化: 将模型输出转回物理角度)
+        # 这一步把归一化空间的动作值转换为真实关节角度
+        # 例如：归一化值 [-2, 2] → 关节角度 [-180, 180]
+        # 需要逐帧处理，因为 postprocessor 期望 shape=(B, action_dim)
+        unnormalized_actions = []
+        for i in range(action_tensor.shape[0]):
+            action_single = action_tensor[i].unsqueeze(0)  # (1, action_dim)
+            action_unnorm = self.postprocessor(action_single)  # 反归一化
+            unnormalized_actions.append(action_unnorm.squeeze(0).cpu())  # (action_dim,) on CPU
 
         # 把 tensor 列表包装成 TimedAction 列表：
         #   timestamp = 观测时间戳 + i * 帧间隔
         #   timestep = 观测帧号 + i
         #   action = Tensor(action_dim,)
         action_chunk = self._time_action_chunk(
-            observation_t.get_timestamp(), list(action_tensor), observation_t.get_timestep()
+            observation_t.get_timestamp(), unnormalized_actions, observation_t.get_timestep()
         )
         postprocessing_time = time.perf_counter() - start_time
         inference_stops = time.perf_counter()
@@ -540,10 +572,11 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         # full-process latency breakdown for debugging purposes
         self.logger.debug(
             f"Observation {observation_t.get_timestep()} | "
-            f"Preprocessing time: {1000 * (preprocessing_time - inference_starts):.2f}ms | "
-            f"Inference time: {1000 * (inference_time - preprocessing_time):.2f}ms | "
-            f"Postprocessing time: {1000 * (postprocessing_time - inference_time):.2f}ms | "
-            f"Total time: {1000 * (postprocessing_time - inference_starts):.2f}ms"
+            f"Raw prep time: {1000 * prep_raw_time:.2f}ms | "
+            f"Normalize time: {1000 * prep_norm_time:.2f}ms | "
+            f"Inference time: {1000 * inference_time:.2f}ms | "
+            f"Unnormalize time: {1000 * (postprocessing_time):.2f}ms | "
+            f"Total time: {1000 * (inference_stops - inference_starts):.2f}ms"
         )
 
         return action_chunk

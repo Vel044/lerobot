@@ -488,9 +488,12 @@ class RobotClient:
         # timed_action.get_action() → Tensor(action_dim,)，各关节目标位置
         # _action_tensor_to_action_dict() 把 tensor 展开成 {"joint_name": float} 字典
         # robot.send_action() 通过串口 sync_write 把目标位置发给 Feetech 舵机
-        _performed_action = self.robot.send_action(
-            self._action_tensor_to_action_dict(timed_action.get_action())
+        action_dict = self._action_tensor_to_action_dict(timed_action.get_action())
+        # 打印动作值用于调试：归一化后应该是真实角度（-180~180度左右），不是归一化空间的值
+        self.logger.info(
+            f"Action #{timed_action.get_timestep()} values: {action_dict}"
         )
+        _performed_action = self.robot.send_action(action_dict)
         # 更新已执行帧号，receive_actions() 会用此值过滤早于当前的旧 action
         with self.latest_action_lock:
             self.latest_action = timed_action.get_timestep()
