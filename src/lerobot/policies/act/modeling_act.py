@@ -314,8 +314,9 @@ class ACTPolicy(PreTrainedPolicy):
         if self.config.image_features:
             # 浅拷贝，避免修改原始 batch 字典
             batch = dict(batch)
-            # config.image_features 是按顺序排好的摄像头 key 列表
-            # 结果：batch["observation.images"] = [img0, img1, ...] 每个 (B,C,H,W)
+            # 之前：batch["observation.images.handeye"]=Tensor(1,3,360,640), batch["observation.images.fixed"]=Tensor(1,3,360,640)（两个独立键）
+            # 之后：batch["observation.images"]=[Tensor(1,3,360,640), Tensor(1,3,360,640)]（按 config.image_features 顺序合并为一个列表）
+            # 变成[tensor, tensor]格式的列表
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
 
         # 调用 ACT 模型
@@ -904,13 +905,13 @@ class ACT(nn.Module):
             self.encoder_1d_feature_pos_embed.weight.unsqueeze(1)
         )
 
-        # Robot state token
+        # Robot state token so101有关节状态，走着里
         if self.config.robot_state_feature:
             encoder_in_tokens.append(
                 self.encoder_robot_state_input_proj(batch["observation.state"])
             )
 
-        # Environment state token
+        # Environment state token外部传感器 我这个机器人没有（力传感器、物体位置等额外输入）
         if self.config.env_state_feature:
             encoder_in_tokens.append(
                 self.encoder_env_state_input_proj(batch["observation.environment_state"])
@@ -1098,8 +1099,8 @@ class ACTEncoderLayer(nn.Module):
         if self.pre_norm:
             x = self.norm1(x)
 
-        # Q = K = x + pos_embed（位置编码加到 Query 和 Key）
-        # V = x（不加位置编码，这是标准做法）
+        # （位置编码加到 Query 和 Key）Q = K = x + pos_embed
+        # （不加位置编码，这是标准做法）V = x
         q = k = x if pos_embed is None else x + pos_embed
         x = self.self_attn(q, k, value=x, key_padding_mask=key_padding_mask)[0]
         x = skip + self.dropout1(x)
