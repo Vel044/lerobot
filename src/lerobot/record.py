@@ -463,6 +463,7 @@ def record_loop(
     joint_episode_idx: int | None = None,
     joint_state_names: list[str] | None = None,
     joint_action_names: list[str] | None = None,
+    joint_n_action_steps: int | None = None,
 ):
     """
     核心采集循环 - 执行单次Episode的数据采集或环境重置。
@@ -866,6 +867,7 @@ def record_loop(
                 _frame_idx,
                 _chunk_seq,
                 _step_in_chunk,
+                joint_n_action_steps if joint_n_action_steps is not None else -1,
             ]
             # state 列：observation_frame["observation.state"] 已是按 names 顺序的 ndarray
             _state_arr = observation_frame.get("observation.state") if isinstance(observation_frame, dict) else None
@@ -1254,9 +1256,14 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 _joint_episode_offset = _max + 1
         _joint_csv_fh = open(JOINT_CSV_FILE, "a", newline="")  # noqa: SIM115
         _joint_csv_writer = csv.writer(_joint_csv_fh)
+        _joint_n_action_steps = (
+            cfg.policy.n_action_steps
+            if cfg.policy is not None and hasattr(cfg.policy, "n_action_steps")
+            else -1
+        )
         if _joint_write_header:
             _joint_header = (
-                ["episode_idx", "frame_idx", "chunk_seq", "step_in_chunk"]
+                ["episode_idx", "frame_idx", "chunk_seq", "step_in_chunk", "n_action_steps"]
                 + [f"state.{n}" for n in _joint_state_names]
                 + [f"action.{n}" for n in _joint_action_names]
             )
@@ -1294,6 +1301,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 joint_episode_idx=_joint_episode_offset + recorded_episodes,
                 joint_state_names=_joint_state_names,
                 joint_action_names=_joint_action_names,
+                joint_n_action_steps=_joint_n_action_steps,
             )
 
             episode_end = time.perf_counter()
