@@ -13,7 +13,11 @@ analysis/
 │   ├── chart1_time_pct.png
 │   ├── chart2_fps.png
 │   └── chart3_ms_per_frame.png
-├── 02_task_comparison/         # 实验02：三类任务工作负载对比 ⬜
+├── 02_task_comparison/         # 实验02：三类任务工作负载对比 ✅
+│   ├── cs100_task_comparison.py
+│   ├── plot_cs100_comparison.py
+│   ├── cs100_task_comparison.md
+│   └── cs100_task_comparison.png
 ├── 03_onnx_optimization/       # 实验03：ONNX 量化推理对比 ⬜
 └── README.md
 ```
@@ -23,7 +27,7 @@ analysis/
 | 编号 | 实验 | 状态 | model 前缀 |
 |------|------|------|-----------|
 | 01 | chunk_size 参数扫描 | ✅ 已完成 | `so101_act_bottle_cs*` |
-| 02 | 三类任务工作负载对比 | ⬜ 待采集 | `so101_act_*_cs100` |
+| 02 | 三类任务工作负载对比 | ✅ 已完成（pick/push/classification 各 20 ep） | `so101_act_*_cs100` |
 | 03 | ONNX 量化推理对比 | ⬜ 待开始 | `so101_act_onnx_*` |
 
 ## 新增实验步骤
