@@ -16,6 +16,6 @@ for ((run=1; run<=NUM_RUNS; run++)); do
     trace_mb=$(du -m "$RAW_DIR/strace_B_${run}.log" | cut -f1)
     echo "  trace: ${trace_mb}MB"
     echo ""
-    sleep 30
+    sleep 1
 done
 echo "=== Group B done ==="

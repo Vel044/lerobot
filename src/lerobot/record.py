@@ -667,6 +667,18 @@ def record_loop(
     _acc_wait = 0.0
     _frame_count = 0
 
+    # 通过 FIFO 通知外部 episode 开始/结束（用于 ftrace 精确打点）
+    # 环境变量 LEROBOT_INFERENCE_FIFO 指定 FIFO 路径
+    # START: episode 开始（record loop 入口）→ END: episode 结束（record loop 退出）
+    _fifo_path = os.environ.get("LEROBOT_INFERENCE_FIFO")
+    if _fifo_path:
+        try:
+            fd = os.open(_fifo_path, os.O_WRONLY | os.O_NONBLOCK)
+            os.write(fd, b"START\n")
+            os.close(fd)
+        except Exception:
+            pass
+
     # 主控制循环：执行直到达到指定时长
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()  # 本次循环开始时刻
@@ -732,18 +744,6 @@ def record_loop(
         inference_start_t = time.perf_counter()
 
         # 通过 FIFO 通知外部推理阶段开始/结束（用于 ftrace 等工具精确打点）
-        # 环境变量 LEROBOT_INFERENCE_FIFO 指定 FIFO 路径，写入 "START\n" / "END\n"
-        # O_WRONLY | O_NONBLOCK：非阻塞写，避免 FIFO 无 reader 时卡死
-        _fifo_path = os.environ.get("LEROBOT_INFERENCE_FIFO")
-        if _fifo_path:
-            try:
-                import fcntl
-                fd = os.open(_fifo_path, os.O_WRONLY | os.O_NONBLOCK)
-                os.write(fd, b"START\n")
-                os.close(fd)
-            except Exception:
-                pass
-
         if policy is not None and preprocessor is not None and postprocessor is not None:
             # ========== 策略推理路径 ==========
             # 输入: observation_frame (数据集格式的观测)
@@ -768,14 +768,6 @@ def record_loop(
             }
             inference_end_t = time.perf_counter()
 
-            if _fifo_path:
-                try:
-                    fd = os.open(_fifo_path, os.O_WRONLY | os.O_NONBLOCK)
-                    os.write(fd, b"END\n")
-                    os.close(fd)
-                except Exception:
-                    pass
-
         elif policy is None and isinstance(teleop, Teleoperator):
             # ========== 单遥操作路径 ==========
             # 直接从遥操作设备获取当前时刻的动作
@@ -785,14 +777,6 @@ def record_loop(
             # 遥操作动作标准化处理
             act_processed_teleop = teleop_action_processor((act, obs))
             inference_end_t = time.perf_counter()
-
-            if _fifo_path:
-                try:
-                    fd = os.open(_fifo_path, os.O_WRONLY | os.O_NONBLOCK)
-                    os.write(fd, b"END\n")
-                    os.close(fd)
-                except Exception:
-                    pass
 
         elif policy is None and isinstance(teleop, list):
             # ========== 多遥操作路径（LeKiwi特殊） ==========
@@ -815,14 +799,6 @@ def record_loop(
             # 5. 遥操作动作标准化处理
             act_processed_teleop = teleop_action_processor((act, obs))
             inference_end_t = time.perf_counter()
-
-            if _fifo_path:
-                try:
-                    fd = os.open(_fifo_path, os.O_WRONLY | os.O_NONBLOCK)
-                    os.write(fd, b"END\n")
-                    os.close(fd)
-                except Exception:
-                    pass
 
         else:
             # ========== 无动作来源（重置阶段可能发生）==========
@@ -951,6 +927,15 @@ def record_loop(
                 f"fps={1/total_loop_time:.1f}"
             )
             last_log_t = timestamp
+
+    # END: episode 结束（record loop 退出后）
+    if _fifo_path:
+        try:
+            fd = os.open(_fifo_path, os.O_WRONLY | os.O_NONBLOCK)
+            os.write(fd, b"END\n")
+            os.close(fd)
+        except Exception:
+            pass
 
     # ============================================================
     # 返回本次 episode 的累计计时统计

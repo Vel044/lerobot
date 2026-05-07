@@ -10,13 +10,17 @@ echo "=== Group E: trace-cmd, $NUM_RUNS runs ==="
 
 for ((run=1; run<=NUM_RUNS; run++)); do
     echo "--- run $run ---"
-    trace-cmd record -o "$RAW_DIR/trace_E_${run}.dat" \
-        $(for tp in "${TRACEPOINTS[@]}"; do echo "-e $tp"; done) \
+    EVENT_ARGS=()
+    for tp in "${TRACEPOINTS[@]}"; do
+        EVENT_ARGS+=("-e" "$tp")
+    done
+    sudo trace-cmd record -o "$RAW_DIR/trace_E_${run}.dat" \
+        "${EVENT_ARGS[@]}" \
         -- "${RECORD_CMD[@]}" --timing_tag="E_${run}"
 
     trace_mb=$(du -m "$RAW_DIR/trace_E_${run}.dat" | cut -f1)
     echo "  trace: ${trace_mb}MB"
     echo ""
-    sleep 30
+    sleep 1
 done
 echo "=== Group E done ==="

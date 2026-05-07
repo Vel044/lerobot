@@ -12,6 +12,6 @@ for ((run=1; run<=NUM_RUNS; run++)); do
     echo "--- run $run ---"
     "${RECORD_CMD[@]}" --timing_tag="A_${run}"
     echo ""
-    sleep 30
+    sleep 1
 done
 echo "=== Group A done ==="

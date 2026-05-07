@@ -1,0 +1,1 @@
+        -- "${RECORD_CMD[@]}" --timing_tag="E_${run}"

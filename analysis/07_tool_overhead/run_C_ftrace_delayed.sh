@@ -83,6 +83,6 @@ for ((run=1; run<=NUM_RUNS; run++)); do
     lost=$(grep -c "lost" "$RAW_DIR/ftrace_C_${run}.txt" 2>/dev/null || echo "0")
     echo "  trace: ${trace_mb}MB, lost events: $lost"
     echo ""
-    sleep 30
+    sleep 1
 done
 echo "=== Group C done ==="
