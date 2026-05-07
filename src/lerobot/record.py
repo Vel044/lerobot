@@ -52,6 +52,7 @@
 import csv
 import logging
 import os
+import resource
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -309,6 +310,7 @@ class RecordConfig:
     display_data: bool = False  # 是否显示画面
     play_sounds: bool = True  # 是否语音播报
     resume: bool = False  # 是否恢复采集
+    timing_tag: str = ""  # 实验分组标签，如 "A_baseline"/"C_ftrace"，写入 timing_stats.csv
 
     def __post_init__(self):
         """
@@ -436,6 +438,24 @@ class RecordConfig:
 """
 
 
+def _read_cpu_temp() -> float:
+    """读 CPU 温度(°C)，树莓派 sysfs，失败返回 0.0"""
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            return int(f.read().strip()) / 1000.0
+    except (FileNotFoundError, ValueError):
+        return 0.0
+
+
+def _read_cpu_freq() -> float:
+    """读 CPU 频率(MHz)，失败返回 0.0"""
+    try:
+        with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq") as f:
+            return int(f.read().strip()) / 1000.0
+    except (FileNotFoundError, ValueError):
+        return 0.0
+
+
 @safe_stop_image_writer
 def record_loop(
     robot: Robot,
@@ -458,12 +478,6 @@ def record_loop(
     control_time_s: int | None = None,
     single_task: str | None = None,
     display_data: bool = False,
-    joint_csv_writer: "csv.writer | None" = None,
-    joint_csv_fh=None,
-    joint_episode_idx: int | None = None,
-    joint_state_names: list[str] | None = None,
-    joint_action_names: list[str] | None = None,
-    joint_n_action_steps: int | None = None,
 ):
     """
     核心采集循环 - 执行单次Episode的数据采集或环境重置。
@@ -653,16 +667,6 @@ def record_loop(
     _acc_wait = 0.0
     _frame_count = 0
 
-    # ============================================================
-    # Chunk 追踪状态（用于 joint_csv_writer 输出）
-    # chunk_seq: 当前 episode 内已生成的 chunk 序号（从 0 开始）
-    # step_in_chunk: 当前帧在 chunk 内的索引（0 = chunk 第一帧）
-    # frame_idx: episode 内的帧序号
-    # ============================================================
-    _frame_idx = 0
-    _chunk_seq = -1
-    _step_in_chunk = -1
-
     # 主控制循环：执行直到达到指定时长
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()  # 本次循环开始时刻
@@ -729,21 +733,6 @@ def record_loop(
 
         if policy is not None and preprocessor is not None and postprocessor is not None:
             # ========== 策略推理路径 ==========
-            # 推理前检查 action queue 长度：== 0 表示本次将生成新 chunk
-            # ACT/Diffusion/PI0 等使用 _action_queue；SmolVLA 等使用 _queues[ACTION]
-            _q_len_before = 0
-            if hasattr(policy, "_action_queue"):
-                _q_len_before = len(policy._action_queue)
-            elif hasattr(policy, "_queues"):
-                from lerobot.constants import ACTION as _ACTION_KEY
-                _q_len_before = len(policy._queues.get(_ACTION_KEY, []))
-            if _q_len_before == 0:
-                # 新 chunk 生成
-                _chunk_seq += 1
-                _step_in_chunk = 0
-            else:
-                _step_in_chunk += 1
-
             # 输入: observation_frame (数据集格式的观测)
             # 内部流程: tensor转换 → 预处理 → policy.select_action() → 后处理
             # 输出: action_values (numpy数组，按动作索引排列)
@@ -858,42 +847,6 @@ def record_loop(
             # 无数据集时不打包
             dataset_frame_start_t = dataset_frame_end_t = send_action_end_t
 
-        # ========== 关节状态/动作 CSV 写入 ==========
-        # 每帧写入一行：episode_idx, frame_idx, chunk_seq, step_in_chunk,
-        # 各 observation.state 关节值, 各 action 关节值
-        if joint_csv_writer is not None and dataset is not None:
-            _row = [
-                joint_episode_idx if joint_episode_idx is not None else -1,
-                _frame_idx,
-                _chunk_seq,
-                _step_in_chunk,
-                joint_n_action_steps if joint_n_action_steps is not None else -1,
-            ]
-            # state 列：observation_frame["observation.state"] 已是按 names 顺序的 ndarray
-            _state_arr = observation_frame.get("observation.state") if isinstance(observation_frame, dict) else None
-            if joint_state_names is not None:
-                if _state_arr is not None:
-                    try:
-                        _row += [float(_state_arr[i]) for i in range(len(joint_state_names))]
-                    except Exception:
-                        # 兜底：从 obs_processed 按关节名查 "{name}"（实际键为 "{motor}.pos"）
-                        _row += [float(obs_processed.get(n, float("nan"))) for n in joint_state_names]
-                else:
-                    _row += [float(obs_processed.get(n, float("nan"))) for n in joint_state_names]
-            # action 列：action_values 是 {joint_name: float} 字典
-            if joint_action_names is not None:
-                if isinstance(action_values, dict):
-                    _row += [float(action_values.get(n, float("nan"))) for n in joint_action_names]
-                else:
-                    try:
-                        _row += [float(action_values[i]) for i in range(len(joint_action_names))]
-                    except Exception:
-                        _row += [float("nan")] * len(joint_action_names)
-            joint_csv_writer.writerow(_row)
-            if joint_csv_fh is not None:
-                joint_csv_fh.flush()
-        _frame_idx += 1
-
         # ========== 可视化 ==========
         if display_data:
             display_start_t = time.perf_counter()
@@ -970,6 +923,7 @@ def record_loop(
         return {
             "frames": _frame_count,
             "episode_total_s": _total,
+            "fps_mean": _frame_count / _total,
             "obs_s": _acc_obs,
             "inference_s": _acc_inference,
             "action_s": _acc_action,
@@ -1196,10 +1150,13 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         TIMING_CSV_FILE = os.path.expanduser("~/lerobot/analysis/timing_stats.csv")
         _CSV_HEADER = [
             "model", "episode_idx",
-            "frames",
-            "episode_total_s",
+            "frames", "episode_total_s", "fps_mean",
             "obs_s", "inference_s", "action_s", "wait_s",
             "obs_pct", "inference_pct", "action_pct", "wait_pct",
+            "user_time_s", "system_time_s", "max_rss_kb",
+            "voluntary_cs", "involuntary_cs",
+            "cpu_temp_start_c", "cpu_temp_end_c", "cpu_freq_mean_mhz",
+            "timing_tag",
         ]
         # 提取模型名称（取 pretrained_path 的最后一段）
         _model_name = (
@@ -1222,53 +1179,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             _timing_csv_fh.flush()
 
         # ============================================================
-        # 关节状态/推理动作 CSV 输出（用于分析每个 chunk 的推理结果）
-        # 路径：~/lerobot/analysis/joint_predictions_<model>.csv
-        # 字段：episode_idx, frame_idx, chunk_seq, step_in_chunk,
-        #       state.<joint>..., action.<joint>...
+        # 系统指标基准快照（resource + CPU 温度/频率）
         # ============================================================
-        _joint_state_names = (
-            list(dataset.features["observation.state"]["names"])
-            if "observation.state" in dataset.features
-            else []
-        )
-        _joint_action_names = (
-            list(dataset.features["action"]["names"])
-            if "action" in dataset.features
-            else []
-        )
-        JOINT_CSV_FILE = os.path.expanduser(
-            f"~/lerobot/analysis/joint_predictions_{_model_name}.csv"
-        )
-        os.makedirs(os.path.dirname(JOINT_CSV_FILE), exist_ok=True)
-        _joint_write_header = not os.path.exists(JOINT_CSV_FILE)
-        # 计算 episode_idx 起始偏移：以已有行中最大 episode_idx + 1 起算
-        _joint_episode_offset = 0
-        if not _joint_write_header:
-            with open(JOINT_CSV_FILE, newline="") as _f:
-                _r = csv.DictReader(_f)
-                _max = -1
-                for row in _r:
-                    try:
-                        _max = max(_max, int(row.get("episode_idx", -1)))
-                    except (ValueError, TypeError):
-                        pass
-                _joint_episode_offset = _max + 1
-        _joint_csv_fh = open(JOINT_CSV_FILE, "a", newline="")  # noqa: SIM115
-        _joint_csv_writer = csv.writer(_joint_csv_fh)
-        _joint_n_action_steps = (
-            cfg.policy.n_action_steps
-            if cfg.policy is not None and hasattr(cfg.policy, "n_action_steps")
-            else -1
-        )
-        if _joint_write_header:
-            _joint_header = (
-                ["episode_idx", "frame_idx", "chunk_seq", "step_in_chunk", "n_action_steps"]
-                + [f"state.{n}" for n in _joint_state_names]
-                + [f"action.{n}" for n in _joint_action_names]
-            )
-            _joint_csv_writer.writerow(_joint_header)
-            _joint_csv_fh.flush()
+        _rusage_start = resource.getrusage(resource.RUSAGE_SELF)
+        _cpu_temp_start = _read_cpu_temp()
+        _freq_samples = []
 
         # ============================================================
         # Episode采集循环
@@ -1281,6 +1196,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             write_trace_time(f"episode_start|{episode_start}", episode_start)
 
             # ========== 执行采集Episode ==========
+            _freq_samples.append(_read_cpu_freq())
             ep_timing = record_loop(
                 robot=robot,
                 events=events,
@@ -1296,23 +1212,31 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 control_time_s=cfg.dataset.episode_time_s,
                 single_task=cfg.dataset.single_task,
                 display_data=cfg.display_data,
-                joint_csv_writer=_joint_csv_writer,
-                joint_csv_fh=_joint_csv_fh,
-                joint_episode_idx=_joint_episode_offset + recorded_episodes,
-                joint_state_names=_joint_state_names,
-                joint_action_names=_joint_action_names,
-                joint_n_action_steps=_joint_n_action_steps,
             )
 
             episode_end = time.perf_counter()
             write_trace_time(f"episode_end|{episode_end}", episode_end)
 
-            # 写入本 episode 计时统计
+            # 写入本 episode 计时统计 + 系统指标
             if ep_timing is not None:
+                _freq_samples.append(_read_cpu_freq())
+                _rusage_end = resource.getrusage(resource.RUSAGE_SELF)
+                _cpu_temp_end = _read_cpu_temp()
+                _freq_mean = sum(_freq_samples) / len(_freq_samples) if _freq_samples else 0.0
+
                 _timing_csv_writer.writerow({
                     "model": _model_name,
                     "episode_idx": _episode_idx_offset + recorded_episodes,
                     **{k: f"{v:.6f}" if isinstance(v, float) else v for k, v in ep_timing.items()},
+                    "user_time_s": f"{_rusage_end.ru_utime - _rusage_start.ru_utime:.3f}",
+                    "system_time_s": f"{_rusage_end.ru_stime - _rusage_start.ru_stime:.3f}",
+                    "max_rss_kb": str(_rusage_end.ru_maxrss),
+                    "voluntary_cs": str(_rusage_end.ru_nvcsw),
+                    "involuntary_cs": str(_rusage_end.ru_nivcsw),
+                    "cpu_temp_start_c": f"{_cpu_temp_start:.1f}",
+                    "cpu_temp_end_c": f"{_cpu_temp_end:.1f}",
+                    "cpu_freq_mean_mhz": f"{_freq_mean:.0f}",
+                    "timing_tag": cfg.timing_tag,
                 })
                 _timing_csv_fh.flush()
 
@@ -1358,8 +1282,6 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         # 关闭计时 CSV 文件
         _timing_csv_fh.close()
         logging.info(f"[Timing] 计时统计已写入: {TIMING_CSV_FILE}")
-        _joint_csv_fh.close()
-        logging.info(f"[Joint] 关节状态/推理动作已写入: {JOINT_CSV_FILE}")
 
     # ============================================================
     # 采集结束：清理资源
