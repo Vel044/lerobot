@@ -10,7 +10,7 @@ echo "=== Group A: baseline, $NUM_RUNS runs ==="
 
 for ((run=1; run<=NUM_RUNS; run++)); do
     echo "--- run $run ---"
-    "${RECORD_CMD[@]}" --timing-tag="A_${run}"
+    "${RECORD_CMD[@]}" --timing_tag="A_${run}"
     echo ""
     sleep 30
 done

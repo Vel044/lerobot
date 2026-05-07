@@ -11,7 +11,7 @@ echo "=== Group B: strace, $NUM_RUNS runs ==="
 for ((run=1; run<=NUM_RUNS; run++)); do
     echo "--- run $run ---"
     strace -f -ttT -o "$RAW_DIR/strace_B_${run}.log" \
-        "${RECORD_CMD[@]}" --timing-tag="B_${run}"
+        "${RECORD_CMD[@]}" --timing_tag="B_${run}"
 
     trace_mb=$(du -m "$RAW_DIR/strace_B_${run}.log" | cut -f1)
     echo "  trace: ${trace_mb}MB"

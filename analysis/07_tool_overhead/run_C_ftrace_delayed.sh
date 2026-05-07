@@ -13,7 +13,7 @@ for ((run=1; run<=NUM_RUNS; run++)); do
     ftrace_enable
     sudo sh -c "echo 1 > $TRACEFS/tracing_on"
 
-    "${RECORD_CMD[@]}" --timing-tag="C_${run}"
+    "${RECORD_CMD[@]}" --timing_tag="C_${run}"
 
     sudo sh -c "echo 0 > $TRACEFS/tracing_on"
     sudo cat "$TRACEFS/trace" > "$RAW_DIR/ftrace_C_${run}.txt"

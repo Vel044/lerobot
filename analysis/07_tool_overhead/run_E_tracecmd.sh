@@ -12,7 +12,7 @@ for ((run=1; run<=NUM_RUNS; run++)); do
     echo "--- run $run ---"
     trace-cmd record -o "$RAW_DIR/trace_E_${run}.dat" \
         $(for tp in "${TRACEPOINTS[@]}"; do echo "-e $tp"; done) \
-        -- "${RECORD_CMD[@]}" --timing-tag="E_${run}"
+        -- "${RECORD_CMD[@]}" --timing_tag="E_${run}"
 
     trace_mb=$(du -m "$RAW_DIR/trace_E_${run}.dat" | cut -f1)
     echo "  trace: ${trace_mb}MB"

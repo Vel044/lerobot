@@ -15,7 +15,7 @@ for ((run=1; run<=NUM_RUNS; run++)); do
     sudo cat "$TRACEFS/trace_pipe" > "$RAW_DIR/ftrace_D_${run}.txt" &
     pipe_pid=$!
 
-    "${RECORD_CMD[@]}" --timing-tag="D_${run}"
+    "${RECORD_CMD[@]}" --timing_tag="D_${run}"
 
     sudo kill "$pipe_pid" 2>/dev/null || true
     wait "$pipe_pid" 2>/dev/null || true
