@@ -29,14 +29,14 @@ RECORD_CMD=(
     --resume=true
 )
 
-# ftrace 需要的 tracepoint
+# ftrace 需要的 tracepoint（目录格式：category/event_name）
 TRACEPOINTS=(
-    syscalls:sys_enter_ioctl   syscalls:sys_exit_ioctl
-    syscalls:sys_enter_pselect6 syscalls:sys_exit_pselect6
-    syscalls:sys_enter_read    syscalls:sys_exit_read
-    syscalls:sys_enter_write   syscalls:sys_exit_write
-    syscalls:sys_enter_clock_nanosleep syscalls:sys_exit_clock_nanosleep
-    syscalls:sys_enter_futex   syscalls:sys_exit_futex
+    syscalls/sys_enter_ioctl   syscalls/sys_exit_ioctl
+    syscalls/sys_enter_pselect6 syscalls/sys_exit_pselect6
+    syscalls/sys_enter_read    syscalls/sys_exit_read
+    syscalls/sys_enter_write   syscalls/sys_exit_write
+    syscalls/sys_enter_clock_nanosleep syscalls/sys_exit_clock_nanosleep
+    syscalls/sys_enter_futex   syscalls/sys_exit_futex
 )
 
 ftrace_enable() {
