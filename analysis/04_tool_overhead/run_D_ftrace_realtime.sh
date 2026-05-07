@@ -64,7 +64,7 @@ for ((run=1; run<=NUM_RUNS; run++)); do
     done
 
     # 运行 record.py
-    LEROBOT_INFERENCE_FIFO="$FIFO" "${RECORD_CMD[@]}" --timing_tag="D_${run}"
+    PYTHONPATH=/home/vel/lerobot/src:${PYTHONPATH:-} LEROBOT_INFERENCE_FIFO="$FIFO" "${RECORD_CMD[@]}" --timing_tag="D_${run}"
 
     # 等待 listener 处理完
     kill "$fifo_pid" 2>/dev/null || true

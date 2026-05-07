@@ -10,7 +10,7 @@ TRACEFS=/sys/kernel/debug/tracing
 
 # record 公共参数
 RECORD_CMD=(
-    cd /home/vel/lerobot && python -m lerobot.record
+    python -m lerobot.record
     --robot.type=so101_follower
     --robot.port=/dev/ttyACM0
     --robot.id=R12254705
