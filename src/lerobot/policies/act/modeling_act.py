@@ -90,6 +90,19 @@ from lerobot.constants import ACTION, OBS_IMAGES
 from lerobot.policies.act.configuration_act import ACTConfig
 from lerobot.policies.pretrained import PreTrainedPolicy
 
+# ── 推理管线逐模块计时基础设施（实验 06）─────────────────────────
+# 复用 control_utils 的全局记录列表，子模块计时直接追加到同一个列表
+import os as _os
+import time as _time
+
+_PROFILING = _os.environ.get("LEROBOT_PROFILING", "") == "1"
+_profiling_records: list | None = None  # 由外部脚本注入，与 control_utils 共享同一列表
+
+
+def _tmark(module: str, t0_ns: int):
+    if _profiling_records is not None:
+        _profiling_records.append((module, (_time.perf_counter_ns() - t0_ns) / 1e6))
+
 
 class ACTPolicy(PreTrainedPolicy):
     """
@@ -275,12 +288,16 @@ class ACTPolicy(PreTrainedPolicy):
         if len(self._action_queue) == 0:
             # predict_action_chunk 返回 (B, chunk_size, action_dim)
             # [:, :n_action_steps] 取前 n_action_steps 步，其余丢弃
+            _t_chunk = _time.perf_counter_ns() if _PROFILING else 0
             actions = self.predict_action_chunk(batch)[:, : self.config.n_action_steps]
+            if _PROFILING: _tmark("predict_action_chunk", _t_chunk)
 
             # actions: (B, n_action_steps, action_dim)
             # transpose(0,1): (n_action_steps, B, action_dim)
             # extend 后队列里有 n_action_steps 个 (B, action_dim) 张量
+            _t_queue = _time.perf_counter_ns() if _PROFILING else 0
             self._action_queue.extend(actions.transpose(0, 1))
+            if _PROFILING: _tmark("queue_extend", _t_queue)
 
         # 从队列头部弹出当前动作：(B, action_dim)
         return self._action_queue.popleft()
@@ -919,6 +936,7 @@ class ACT(nn.Module):
 
         # 图像 token（逐像素处理，每个像素作为一个 token）
         if self.config.image_features:
+            _t_resnet = _time.perf_counter_ns() if _PROFILING else 0
             for img in batch["observation.images"]:
                 # img: (B, C, H, W) 单路摄像头图像
 
@@ -942,6 +960,7 @@ class ACT(nn.Module):
                 # 扩展到 token 列表
                 encoder_in_tokens.extend(list(cam_features))
                 encoder_in_pos_embed.extend(list(cam_pos_embed))
+            if _PROFILING: _tmark("resnet_backbone", _t_resnet)
 
         # 堆叠: (seq_len, B, dim_model)
         # seq_len = 1(latent) + [1(state)] + [1(env)] + n_cam*(h*w)
@@ -951,7 +970,9 @@ class ACT(nn.Module):
         # ── 步骤 3：Transformer Encoder ──────────────────────────────────
         # 融合 latent、state、图像信息
         # self-attention 让所有 token 相互交互
+        _t_enc = _time.perf_counter_ns() if _PROFILING else 0
         encoder_out = self.encoder(encoder_in_tokens, pos_embed=encoder_in_pos_embed)
+        if _PROFILING: _tmark("transformer_encoder", _t_enc)
 
         # ── 步骤 4：Transformer Decoder ──────────────────────────────────
         # DETR 风格：零向量 + 可学习位置编码作为 query
@@ -963,19 +984,23 @@ class ACT(nn.Module):
         )
         # Decoder 以 decoder_in（零向量+位置编码）为 query
         # 以 encoder_out（观测上下文）为 key/value，通过交叉注意力解码
+        _t_dec = _time.perf_counter_ns() if _PROFILING else 0
         decoder_out = self.decoder(
             decoder_in,
             encoder_out,
             encoder_pos_embed=encoder_in_pos_embed,
             decoder_pos_embed=self.decoder_pos_embed.weight.unsqueeze(1),
         )
+        if _PROFILING: _tmark("transformer_decoder", _t_dec)
 
         # 转置: (chunk_size, B, dim_model) → (B, chunk_size, dim_model)
         decoder_out = decoder_out.transpose(0, 1)
 
         # ── 步骤 5：动作输出头 ───────────────────────────────────────────
         # (B, chunk_size, dim_model) → (B, chunk_size, action_dim)
+        _t_head = _time.perf_counter_ns() if _PROFILING else 0
         actions = self.action_head(decoder_out)
+        if _PROFILING: _tmark("action_head", _t_head)
 
         return actions, (mu, log_sigma_x2)
 
