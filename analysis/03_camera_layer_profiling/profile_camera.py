@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-实验 06：摄像头感知层级耗时采集脚本
+实验 03：摄像头感知层级耗时采集脚本
 
 用法（在树莓派 5 上）：
     python profile_camera.py --episodes 3 --frames 30 \
-        --out robotdoc/实验/06_摄像头感知层级耗时剖析/layer_timing.csv
+        --out robotdoc/实验/03_摄像头感知层级耗时剖析/layer_timing.csv
 
 设计：通过 monkey-patch 切入 OpenCVCamera 的 read / _postprocess_image / async_read
 和 RobotProcessor 的预处理三件套，分别记录 9 层耗时；不修改主代码库。
