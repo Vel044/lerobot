@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-实验 06：摄像头感知层级耗时分布图
+实验 03：摄像头感知层级耗时分布图
 
 输入：layer_timing.csv（profile_camera.py 产出）+ 可选 ftrace 解析后的 layer 1/2 数据
 输出：水平堆叠条形 + 误差棒，按线程归属配色，标注"端到端时延"和"主线程感知耗时"两条参考线

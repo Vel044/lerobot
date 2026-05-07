@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 实验 06：停止 ftrace 并导出 trace log
+# 实验 03：停止 ftrace 并导出 trace log
 set -euo pipefail
 
 TRACE=/sys/kernel/debug/tracing

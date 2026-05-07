@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 实验 06：开启摄像头链路相关的 ftrace tracepoint（layer 1/2）
+# 实验 03：开启摄像头链路相关的 ftrace tracepoint（layer 1/2）
 # 用法：sudo ./start_ftrace.sh [LEROBOT_PID]
 set -euo pipefail
 
