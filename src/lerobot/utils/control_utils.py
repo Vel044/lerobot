@@ -36,21 +36,6 @@ from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.processor import PolicyAction, PolicyProcessorPipeline
 from lerobot.robots import Robot
 
-# ── 推理管线逐模块计时基础设施（实验 06）─────────────────────────
-# LEROBOT_PROFILING=1 启用时，predict_action 内各阶段耗时写入
-# 全局列表 _profiling_records，供离线 replay 脚本采集。
-# 未启用时 if _PROFILING 为 False，perf_counter 不调用，零开销。
-import os as _os
-
-_PROFILING = _os.environ.get("LEROBOT_PROFILING", "") == "1"
-_profiling_records: list | None = None  # 由外部脚本注入 [(module, time_ms), ...]
-
-
-def _tmark(module: str, t0_ns: int):
-    """记录一个计时点到 _profiling_records。仅 _PROFILING=True 时调用。"""
-    if _profiling_records is not None:
-        _profiling_records.append((module, (time.perf_counter_ns() - t0_ns) / 1e6))
-
 
 def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, fps=None):
     """
@@ -184,12 +169,9 @@ def predict_action(
     if hasattr(policy, "_action_queue") and len(policy._action_queue) > 0:
         # 队列非空：直接弹出下一帧动作，跳过观测处理和模型推理
         # action: Tensor (1, action_dim)，即上一次推理缓存的第 i 帧
-        _t0 = time.perf_counter_ns() if _PROFILING else 0
         action = policy._action_queue.popleft()
         action = postprocessor(action)                  # 反归一化到真实关节角度范围
-        result = action.squeeze(0).to("cpu")            # 去掉 batch 维 → (action_dim,)
-        if _PROFILING: _tmark("fast_path", _t0)
-        return result
+        return action.squeeze(0).to("cpu")              # 去掉 batch 维 → (action_dim,)
     if hasattr(policy, "_queues") and len(policy._queues.get(ACTION, [])) > 0:
         # 同上，用于 _queues 字典格式的策略（SmolVLA 等）
         action = policy._queues[ACTION].popleft()
@@ -204,7 +186,6 @@ def predict_action(
         # use_amp=True 时开启混合精度（FP16），加速 CUDA 推理；树莓派 CPU 上不生效
     ):
         # ── 预处理：numpy → PyTorch Tensor，格式转换 ──────────────────────
-        _ta = time.perf_counter_ns() if _PROFILING else 0
         for name in observation:
             # observation[name]: np.ndarray，形状视传感器类型而定
             observation[name] = torch.from_numpy(observation[name])
@@ -216,7 +197,6 @@ def predict_action(
             # unsqueeze(0): 加 batch 维 → (1, ...) 满足模型输入要求
             observation[name] = observation[name].unsqueeze(0)
             observation[name] = observation[name].to(device)  # 移到推理设备（cpu/cuda）
-        if _PROFILING: _tmark("input_prepare", _ta)
 
         # 附加任务描述和机器人类型（语言条件策略如 SmolVLA/PI0 会用到）
         observation["task"] = task if task else ""
@@ -224,9 +204,7 @@ def predict_action(
 
         # ── 运行预处理流水线（归一化、特征提取等）────────────────────────
         # preprocessor: PolicyProcessorPipeline，输入 dict[str, Any]，输出 dict[str, Any]
-        _tb = time.perf_counter_ns() if _PROFILING else 0
         observation = preprocessor(observation)
-        if _PROFILING: _tmark("preprocessor", _tb)
 
         # ── 模型推理：输入观测，输出动作 chunk ────────────────────────────
         # select_action 内部：
@@ -234,13 +212,10 @@ def predict_action(
         #   2. Transformer Encoder + Decoder 融合信息
         #   3. 输出 chunk_size 帧动作序列，缓存到 _action_queue，返回第 0 帧
         # action: Tensor (1, action_dim)，归一化空间的关节角度增量或绝对值
-        _tc = time.perf_counter_ns() if _PROFILING else 0
         action = policy.select_action(observation)
-        if _PROFILING: _tmark("select_action", _tc)
 
         # ── 后处理：反归一化回真实物理单位 ───────────────────────────────
         # postprocessor: PolicyProcessorPipeline，将 [-1,1] 范围映射回实际角度（度/弧度）
-        _td = time.perf_counter_ns() if _PROFILING else 0
         action = postprocessor(action)
 
         # 去掉 batch 维: (1, action_dim) → (action_dim,)
@@ -248,7 +223,6 @@ def predict_action(
 
         # 移回 CPU：机器人控制代码在 CPU 上运行（树莓派无 GPU）
         action = action.to("cpu")
-        if _PROFILING: _tmark("postprocess", _td)
 
     return action
 
