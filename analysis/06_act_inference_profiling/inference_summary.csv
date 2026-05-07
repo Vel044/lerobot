@@ -1,0 +1,6 @@
+module,mean_ms,std_ms,n,pct
+action_head,0.673,0.771,6,0.035
+full,1924.832,414.896,6,100.000
+resnet_backbone,1281.069,259.858,6,66.555
+transformer_decoder,43.955,4.413,6,2.284
+transformer_encoder,569.515,506.261,6,29.588
