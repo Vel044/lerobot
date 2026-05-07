@@ -182,3 +182,6 @@ outputs/
 *.urdf
 *.xml
 *.part
+
+# Analysis raw data
+analysis/*/raw/
