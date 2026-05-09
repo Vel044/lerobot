@@ -1,0 +1,2 @@
+model,episode_idx,frames,episode_total_s,fps_mean,obs_s,inference_s,action_s,wait_s,obs_pct,inference_pct,action_pct,wait_pct,user_time_s,system_time_s,max_rss_kb,voluntary_cs,involuntary_cs,cpu_temp_start_c,cpu_temp_end_c,cpu_freq_mean_mhz,timing_tag
+pretrained_model,0,1121,59.907517,18.712176,7.275322,21.903511,2.901864,27.826821,12.144256,36.562207,4.843906,46.449631,215.141,2.874,908880,39886,116926,55.6,65.5,2400,
