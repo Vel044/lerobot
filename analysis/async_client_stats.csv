@@ -1,0 +1,2 @@
+episode_idx,hold,frames,action_frames,stall_frames,stall_pct,expire_frames,expire_pct,must_go_count,episode_total_s,fps_mean,fps_p5,fps_p95,success,cpu_temp_start_c,cpu_temp_end_c,cpu_freq_mean_mhz
+0,0.30,1315,1116,199,15.13,1078,49.13,18,47.185,26.77,23.34,33.95,-1,50.1,60.0,2400

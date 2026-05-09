@@ -798,6 +798,9 @@ class RobotClient:
                 return int(f.read().strip()) / 1000.0
         except (FileNotFoundError, ValueError):
             return 0.0
+
+
+@draccus.wrap()
 def async_client(cfg: RobotClientConfig):
     """入口函数：启动 RobotClient 的两线程流水线。
 
