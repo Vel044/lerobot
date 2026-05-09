@@ -128,6 +128,7 @@ class RobotClientConfig:
 
     # Control behavior configuration
     chunk_size_threshold: float = field(default=0.5, metadata={"help": "Threshold for chunk size control"})
+    episode_time_s: float = field(default=60.0, metadata={"help": "Duration of each episode in seconds"})
     fps: int = field(default=DEFAULT_FPS, metadata={"help": "Frames per second"})
 
     # Aggregate function configuration (CLI-compatible)

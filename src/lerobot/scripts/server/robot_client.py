@@ -652,6 +652,17 @@ class RobotClient:
             self._episode_start_time = time.perf_counter()
 
         while self.running:
+            # episode 时长到 → 自动停止
+            if self._episode_start_time is not None:
+                elapsed = time.perf_counter() - self._episode_start_time
+                if elapsed >= self.config.episode_time_s:
+                    self.logger.info(
+                        f"Episode time reached {self.config.episode_time_s}s "
+                        f"(elapsed {elapsed:.1f}s), stopping control loop"
+                    )
+                    self.shutdown_event.set()
+                    break
+
             control_loop_start = time.perf_counter()
 
             with self._stats_lock:
