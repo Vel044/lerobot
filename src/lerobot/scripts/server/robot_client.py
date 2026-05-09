@@ -32,12 +32,15 @@ python src/lerobot/scripts/server/robot_client.py \
 ```
 """
 
+import csv
 import logging
+import os
 import pickle  # nosec
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict
+from pathlib import Path
 from pprint import pformat
 from queue import Queue
 from typing import Any
@@ -186,6 +189,16 @@ class RobotClient:
         # 收到新 action chunk 后 must_go 重置为 set（为下一次空队列做准备）
         self.must_go = threading.Event()
         self.must_go.set()  # Initially set - observations qualify for direct processing
+
+        # ===== 异步推理逐帧统计计数器 =====
+        self._stats_lock = threading.Lock()
+        self._stall_frames = 0          # 队列空时机器人停顿的帧数
+        self._expire_frames = 0         # 新 chunk 到货时 timestep <= latest_action 的过期帧数
+        self._must_go_count = 0         # must_go=True 被发送的次数
+        self._total_frames = 0          # control_loop 执行的总 tick 数
+        self._action_frames = 0         # 实际执行了 action 的帧数
+        self._episode_start_time = None # episode 起始时间
+        self._frame_times: list[float] = []  # 每帧完成时间戳，用于算 fps p5/p95
 
     @property
     def running(self):
@@ -338,6 +351,8 @@ class RobotClient:
 
             # 情况 1：新 action 的帧号 ≤ 已执行帧号 → 这帧已经过去了，直接丢弃
             if new_action.get_timestep() <= latest_action:
+                with self._stats_lock:
+                    self._expire_frames += 1
                 continue
 
             # 情况 2：新 action 的帧号不在旧队列里 → 纯未来帧，直接入新队列
@@ -581,6 +596,8 @@ class RobotClient:
 
             self.logger.debug(f"QUEUE SIZE: {current_queue_size} (Must go: {observation.must_go})")
             if observation.must_go:
+                with self._stats_lock:
+                    self._must_go_count += 1
                 # must_go 已用于本次观测，清除标志，等下次收到 action chunk 后再重新 set
                 # 防止后续每帧观测都带 must_go=True，给 server 造成不必要的压力
                 self.must_go.clear()
@@ -630,11 +647,26 @@ class RobotClient:
         _performed_action = None
         _captured_observation = None
 
+        # episode 计时起点
+        if self._episode_start_time is None:
+            self._episode_start_time = time.perf_counter()
+
         while self.running:
             control_loop_start = time.perf_counter()
+
+            with self._stats_lock:
+                self._total_frames += 1
+
             """Control loop: (1) Performing actions, when available"""
             if self.actions_available():
                 _performed_action = self.control_loop_action(verbose)
+                with self._stats_lock:
+                    self._action_frames += 1
+                    self._frame_times.append(time.perf_counter())
+            else:
+                # 队列空 → stall，机器人停住等新 action chunk
+                with self._stats_lock:
+                    self._stall_frames += 1
 
             """Control loop: (2) Streaming observations to the remote policy server"""
             if self._ready_to_send_observation():
@@ -646,10 +678,126 @@ class RobotClient:
             # 如果耗时 > environment_dt（串口慢或推理卡），sleep 0，下一 tick 立刻开始
             time.sleep(max(0, self.config.environment_dt - (time.perf_counter() - control_loop_start)))
 
+            # 每 30 帧（约 1 s）覆盖更新一次 CSV 行
+            with self._stats_lock:
+                _should_update = (self._total_frames % 30 == 0)
+            if _should_update:
+                self._write_stats_row()
+
         return _captured_observation, _performed_action
 
+    # ===== 异步推理统计 CSV =====
+    _ASYNC_CSV_HEADER = [
+        "episode_idx", "hold",
+        "frames", "action_frames", "stall_frames", "stall_pct",
+        "expire_frames", "expire_pct",
+        "must_go_count",
+        "episode_total_s", "fps_mean", "fps_p5", "fps_p95",
+        "success",
+        "cpu_temp_start_c", "cpu_temp_end_c", "cpu_freq_mean_mhz",
+    ]
 
-@draccus.wrap()
+    def _init_csv(self, csv_path: str):
+        """初始化 CSV 文件和 episode_idx。读取已有行数作为本次 episode_idx。"""
+        self._csv_path = csv_path
+        _write_header = not os.path.exists(csv_path)
+        if not _write_header:
+            with open(csv_path, newline="") as f:
+                self._episode_idx = sum(1 for _ in csv.DictReader(f))
+        else:
+            self._episode_idx = 0
+        self._csv_fh = open(csv_path, "a", newline="")  # noqa: SIM115
+        self._csv_writer = csv.DictWriter(self._csv_fh, fieldnames=self._ASYNC_CSV_HEADER)
+        if _write_header:
+            self._csv_writer.writeheader()
+            self._csv_fh.flush()
+        # 读取 CPU 初始温度
+        self._cpu_temp_start = self._read_cpu_temp()
+        self._freq_samples = []
+
+    def _write_stats_row(self, success: int = -1):
+        """覆盖更新当前 episode 行：删最后一行 → 重写。每 30 帧调用一次。"""
+        with self._stats_lock:
+            total = self._total_frames
+            if total == 0:
+                return
+            stall = self._stall_frames
+            expire = self._expire_frames
+            must_go = self._must_go_count
+            action_f = self._action_frames
+            elapsed = time.perf_counter() - self._episode_start_time if self._episode_start_time else 0.0
+            # fps: 按帧间隔计算
+            ft = self._frame_times
+            if len(ft) >= 2:
+                intervals = [ft[i] - ft[i - 1] for i in range(1, len(ft))]
+                intervals.sort()
+                fps_mean = len(ft) / (ft[-1] - ft[0]) if (ft[-1] - ft[0]) > 0 else 0.0
+                # p5/p95 FPS = 1 / (p95/p5 interval)
+                n = len(intervals)
+                fps_p5 = 1.0 / intervals[int(n * 0.95)] if intervals[int(n * 0.95)] > 0 else 0.0
+                fps_p95 = 1.0 / intervals[int(n * 0.05)] if intervals[int(n * 0.05)] > 0 else 0.0
+            else:
+                fps_mean = fps_p5 = fps_p95 = 0.0
+            # chunk 总帧数 = 已执行帧数 + 过期帧数（同一个 chunk 的帧）
+            chunk_total = action_f + expire
+
+        row = {
+            "episode_idx": self._episode_idx,
+            "hold": f"{self._chunk_size_threshold:.2f}",
+            "frames": str(total),
+            "action_frames": str(action_f),
+            "stall_frames": str(stall),
+            "stall_pct": f"{stall / total * 100:.2f}",
+            "expire_frames": str(expire),
+            "expire_pct": f"{expire / chunk_total * 100:.2f}" if chunk_total > 0 else "0.00",
+            "must_go_count": str(must_go),
+            "episode_total_s": f"{elapsed:.3f}",
+            "fps_mean": f"{fps_mean:.2f}",
+            "fps_p5": f"{fps_p5:.2f}",
+            "fps_p95": f"{fps_p95:.2f}",
+            "success": str(success),
+            "cpu_temp_start_c": f"{self._cpu_temp_start:.1f}",
+            "cpu_temp_end_c": f"{self._read_cpu_temp():.1f}",
+            "cpu_freq_mean_mhz": f"{self._read_cpu_freq():.0f}",
+        }
+
+        # 覆盖写入：读取全部行，替换最后一行，重写整个文件
+        try:
+            all_rows = []
+            if os.path.exists(self._csv_path):
+                with open(self._csv_path, newline="") as f:
+                    reader = csv.DictReader(f)
+                    all_rows = list(reader)
+            # 如果已有本 episode 行则替换，否则追加
+            if all_rows and int(all_rows[-1].get("episode_idx", -1)) == self._episode_idx:
+                all_rows[-1] = row
+            else:
+                all_rows.append(row)
+            with open(self._csv_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=self._ASYNC_CSV_HEADER)
+                writer.writeheader()
+                writer.writerows(all_rows)
+                f.flush()
+        except Exception as e:
+            self.logger.error(f"Failed to write stats CSV: {e}")
+
+    @staticmethod
+    def _read_cpu_temp() -> float:
+        """读 CPU 温度(°C)，树莓派 sysfs，失败返回 0.0"""
+        try:
+            with open("/sys/class/thermal/thermal_zone0/temp") as f:
+                return int(f.read().strip()) / 1000.0
+        except (FileNotFoundError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _read_cpu_freq() -> float:
+        """读 CPU 频率(MHz)，失败返回 0.0"""
+        try:
+            with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq") as f:
+                return int(f.read().strip()) / 1000.0
+        except (FileNotFoundError, ValueError):
+            return 0.0
 def async_client(cfg: RobotClientConfig):
     """入口函数：启动 RobotClient 的两线程流水线。
 
@@ -687,6 +835,12 @@ def async_client(cfg: RobotClientConfig):
     if client.start():
         client.logger.info("Starting action receiver thread...")
 
+        # 初始化统计 CSV（路径与 record.py 的 timing_stats.csv 同目录）
+        _csv_dir = os.path.expanduser("~/lerobot/analysis")
+        os.makedirs(_csv_dir, exist_ok=True)
+        _csv_path = os.path.join(_csv_dir, "async_client_stats.csv")
+        client._init_csv(_csv_path)
+
         # daemon=True：主线程退出时后台线程自动终止，不需要手动 join 来保证退出
         # target=receive_actions：后台线程运行 receive_actions() 的 while 循环
         action_receiver_thread = threading.Thread(target=client.receive_actions, daemon=True)
@@ -700,6 +854,8 @@ def async_client(cfg: RobotClientConfig):
             client.control_loop(task=cfg.task)
 
         finally:
+            # 退出前最终写入一次统计（success 留 -1，由人工事后填写）
+            client._write_stats_row(success=-1)
             client.stop()
             # join() 等后台线程处理完最后一个 action chunk 后退出
             action_receiver_thread.join()

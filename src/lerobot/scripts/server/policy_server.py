@@ -24,7 +24,9 @@ python src/lerobot/scripts/server/policy_server.py \
 ```
 """
 
+import csv
 import logging
+import os
 import pickle  # nosec
 import threading
 import time
@@ -109,6 +111,12 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.lerobot_features = None      # dict[str, PolicyFeature]，输入输出特征描述
         self.actions_per_chunk = None     # int，每次推理返回多少帧 action（= chunk_size）
         self.policy = None                # Policy 子类实例，如 ACTPolicy
+
+        # ===== T_infer 统计 CSV =====
+        self._server_csv_path = os.path.expanduser("~/lerobot/analysis/async_server_stats.csv")
+        self._server_csv_header = ["episode_idx", "timestep", "t_infer_s"]
+        self._server_episode_idx = 0
+        self._init_server_csv()
 
     @property
     def running(self):
@@ -325,6 +333,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             # _predict_action_chunk: 预处理 → 推理 → 后处理，返回 list[TimedAction]
             action_chunk = self._predict_action_chunk(obs)
             inference_time = time.perf_counter() - start_time
+
+            # 写入 T_infer 统计行
+            self._write_t_infer(obs.get_timestep(), inference_time)
 
             # pickle 序列化 list[TimedAction] 为 bytes，通过网络发给 client
             start_time = time.perf_counter()
@@ -585,6 +596,33 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         """停止 server：重置所有状态（清空队列和已推理帧号集合）。"""
         self._reset_server()
         self.logger.info("Server stopping...")
+
+    # ===== T_infer 统计 CSV 方法 =====
+    def _init_server_csv(self):
+        """初始化 server 端 CSV，读取已有行数确定 episode_idx。"""
+        os.makedirs(os.path.dirname(self._server_csv_path), exist_ok=True)
+        _write_header = not os.path.exists(self._server_csv_path)
+        if not _write_header:
+            with open(self._server_csv_path, newline="") as f:
+                self._server_episode_idx = sum(1 for _ in csv.DictReader(f))
+        # 不断累加，不做 episode 粒度分段；后续合并脚本按 episode_idx 对齐
+        self._server_csv_fh = open(self._server_csv_path, "a", newline="")  # noqa: SIM115
+        self._server_csv_writer = csv.DictWriter(self._server_csv_fh, fieldnames=self._server_csv_header)
+        if _write_header:
+            self._server_csv_writer.writeheader()
+            self._server_csv_fh.flush()
+
+    def _write_t_infer(self, timestep: int, t_infer_s: float):
+        """每次推理完成写入一行 {episode_idx, timestep, t_infer_s}。"""
+        try:
+            self._server_csv_writer.writerow({
+                "episode_idx": self._server_episode_idx,
+                "timestep": str(timestep),
+                "t_infer_s": f"{t_infer_s:.6f}",
+            })
+            self._server_csv_fh.flush()
+        except Exception as e:
+            self.logger.error(f"Failed to write server CSV: {e}")
 
 
 @draccus.wrap()
