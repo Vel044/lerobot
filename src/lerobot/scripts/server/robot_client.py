@@ -777,7 +777,7 @@ class RobotClient:
 
         row = {
             "episode_idx": self._episode_idx,
-            "hold": f"{self._chunk_size_threshold:.2f}",
+            "hold": f"{self._chunk_size_threshold:.4f}",
             "frames": str(total),
             "action_frames": str(action_f),
             "stall_frames": str(stall),
