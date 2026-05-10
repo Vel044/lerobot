@@ -100,7 +100,8 @@ def main() -> None:
     parser.add_argument("--skip-warmup", "--skip_warmup", type=int, default=2)
     args = parser.parse_args()
 
-    client = pd.read_csv(args.client_csv).sort_values("hold").reset_index(drop=True)
+    # 先保持 client 的原始采集顺序对齐 server；合并后再按 hold 排序输出。
+    client = pd.read_csv(args.client_csv).reset_index(drop=True)
     # server CSV 可能无 header（policy_server 在文件被删后若进程未重启会漏写 header）
     with open(args.server_csv, newline="") as f:
         first_line = f.readline().strip()
@@ -126,7 +127,7 @@ def main() -> None:
     else:
         tinfer = summarize_by_row_split(client, server, args.skip_warmup)
 
-    merged = client.merge(tinfer, on="episode_idx", how="left")
+    merged = client.merge(tinfer, on="episode_idx", how="left").sort_values("hold").reset_index(drop=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(args.output, index=False, float_format="%.4f")
     print(f"对齐模式: {mode}")

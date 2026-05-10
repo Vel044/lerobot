@@ -111,45 +111,61 @@ def build_summary(
 
 def plot_fps(client: pd.DataFrame, labels: list[str], sync_fps: float, out_png: Path) -> None:
     fig, ax = plt.subplots(figsize=(10, 5))
-    x_async = client["hold"].to_numpy(dtype=float)
-    y_async = client["eff_fps"].to_numpy(dtype=float)
+
+    x_all = client["hold"].to_numpy(dtype=float)
+    y_all = client["eff_fps"].to_numpy(dtype=float)
 
     ax.plot(
-        x_async, y_async, color=C_ASYNC, linewidth=2.5, marker="o", markersize=10,
-        markerfacecolor="white", markeredgewidth=2, zorder=3, label="异步实测",
+        x_all, y_all, color=C_ASYNC, linewidth=2.5, marker="o", markersize=10,
+        markerfacecolor="white", markeredgewidth=2, zorder=3,
     )
-    for x, y in zip(x_async, y_async):
+    for x, y in zip(x_all, y_all):
         ax.annotate(
             f"{y:.1f}", (x, y), textcoords="offset points",
             xytext=(0, 12), ha="center", fontsize=10, color=C_ASYNC,
         )
 
-    # 二次多项式拟合趋势线
-    coeffs = np.polyfit(x_async, y_async, deg=2)
-    x_fit = np.linspace(min(x_async) - 0.05, max(x_async) + 0.05, 200)
-    y_fit = np.polyval(coeffs, x_fit)
-    y_pred = np.polyval(coeffs, x_async)
-    ss_res = np.sum((y_async - y_pred) ** 2)
-    ss_tot = np.sum((y_async - np.mean(y_async)) ** 2)
-    r2 = 1 - ss_res / ss_tot
     ax.plot(
-        x_fit, y_fit, color="#D95F02", linewidth=2, linestyle="-.",
-        alpha=0.8, zorder=2, label=f"二次拟合 ($R^2$={r2:.3f})",
+        [0.0], [sync_fps], color=C_SYNC, marker="s", markersize=8,
+        markerfacecolor="white", markeredgewidth=2, linestyle="None",
+        zorder=4, label="同步 baseline",
+    )
+    ax.annotate(
+        f"{sync_fps:.1f}", (0.0, sync_fps), textcoords="offset points",
+        xytext=(0, 12), ha="center", fontsize=10, color=C_SYNC,
     )
 
-    ax.axhline(y=sync_fps, color=C_SYNC, linestyle="--", linewidth=1.5, alpha=0.35, zorder=1)
-    ax.text(
-        x_async[0] - 0.03, sync_fps + 0.4,
-        f"同步 baseline={sync_fps:.1f}", ha="right", va="bottom",
-        fontsize=10, color=C_SYNC, alpha=0.5,
+    mask_left = (x_all >= 0.10) & (x_all <= 0.30)
+    x_left = np.concatenate(([0.0], x_all[mask_left]))
+    y_left = np.concatenate(([sync_fps], y_all[mask_left]))
+    coeffs = np.polyfit(x_left, y_left, deg=1)
+    x_fit = np.linspace(0.0, 0.30, 100)
+    y_fit = np.polyval(coeffs, x_fit)
+    ax.plot(
+        x_fit, y_fit, color="#D95F02", linewidth=2,
+        linestyle="-.", alpha=0.75, zorder=2.5,
+        label="线性趋势",
     )
+
+    # 平台区：从 0.30 开始横着，取 hold=0.30 的实测值（到达满帧）
+    plateau_value = float(y_all[x_all == 0.30][0])
+    ax.hlines(
+        plateau_value, xmin=0.30, xmax=0.62,
+        color="#8172B2", linewidth=2,
+        linestyle="-", alpha=0.75, zorder=2.5,
+        label=f"满帧运行 {plateau_value:.1f} FPS",
+    )
+
+    ax.axhline(y=sync_fps, color=C_SYNC, linestyle="--", linewidth=1.5, alpha=0.25, zorder=1)
 
     ax.set_xlabel("hold (chunk_size_threshold)", fontsize=12)
     ax.set_ylabel("有效 FPS (action_frames / episode_total_s)", fontsize=12)
     ax.set_title(f"异步推理 hold 扫描：有效 FPS 与同步 baseline 对比（60s/组）", fontsize=13)
-    ax.set_xlim(min(x_async) - 0.08, max(x_async) + 0.03)
-    ax.set_ylim(0, max(y_async.max(), sync_fps) * 1.15)
-    ax.legend(fontsize=10, loc="lower right")
+    ax.set_xlim(-0.03, 0.65)
+    ax.set_ylim(0, max(y_all.max(), sync_fps) * 1.15)
+    ax.set_xticks([0.0, 0.10, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50, 0.60])
+    ax.set_xticklabels(["baseline", "0.10", "0.20", "0.25", "0.30", "0.35", "0.40", "0.50", "0.60"])
+    ax.legend(fontsize=10, loc="lower right", ncol=2)
     ax.grid(axis="y", linestyle="--", alpha=0.4, zorder=0)
 
     fig.tight_layout()
@@ -281,7 +297,8 @@ def main() -> None:
     args = parser.parse_args()
 
     _setup_fonts()
-    client = pd.read_csv(args.client_csv).sort_values("hold").reset_index(drop=True)
+    # 保持原始采集顺序先对齐 server 日志；对齐完成后再按 hold 排序用于绘图。
+    client_raw = pd.read_csv(args.client_csv).reset_index(drop=True)
     # server CSV 可能无 header
     with open(args.server_csv, newline="") as f:
         first_line = f.readline().strip()
@@ -292,9 +309,13 @@ def main() -> None:
         server = pd.read_csv(args.server_csv, header=None, names=["episode_idx", "timestep", "t_infer_s"])
     sync_fps = load_sync_fps(args.sync_csv, args.sync_tag)
 
-    client["eff_fps"] = client["action_frames"] / client["episode_total_s"]
+    client_raw["eff_fps"] = client_raw["action_frames"] / client_raw["episode_total_s"]
+    tinfer_raw = split_server_tinfer(server, client_raw, args.skip_warmup)
+
+    order = np.argsort(client_raw["hold"].to_numpy(dtype=float))
+    client = client_raw.iloc[order].reset_index(drop=True)
+    tinfer_data = [tinfer_raw[i] for i in order]
     labels = [f"{h:.2f}" for h in client["hold"]]
-    tinfer_data = split_server_tinfer(server, client, args.skip_warmup)
 
     args.outdir.mkdir(parents=True, exist_ok=True)
     summary = build_summary(client, tinfer_data, sync_fps)
