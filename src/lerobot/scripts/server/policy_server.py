@@ -611,16 +611,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
                 rows = list(csv.DictReader(f))
                 if rows:
                     episode_values = {int(row.get("episode_idx", 0)) for row in rows}
-                    if len(episode_values) > 1:
-                        self._server_episode_idx = max(episode_values) + 1
-                    else:
-                        self._server_episode_idx = 0
-                        prev_timestep = int(rows[0].get("timestep", -1))
-                        for row in rows[1:]:
-                            timestep = int(row.get("timestep", -1))
-                            if timestep < prev_timestep:
-                                self._server_episode_idx += 1
-                            prev_timestep = timestep
+                    self._server_episode_idx = max(episode_values) + 1
                     self._last_timestep = int(rows[-1].get("timestep", -1))
         self._server_csv_fh = open(self._server_csv_path, "a", newline="")  # noqa: SIM115
         self._server_csv_writer = csv.DictWriter(self._server_csv_fh, fieldnames=self._server_csv_header)

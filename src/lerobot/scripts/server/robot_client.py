@@ -728,12 +728,16 @@ class RobotClient:
     ]
 
     def _init_csv(self, csv_path: str):
-        """初始化 CSV 文件和 episode_idx。读取已有行数作为本次 episode_idx。"""
+        """初始化 CSV 文件和 episode_idx。已有数据时取最大 episode_idx + 1，避免覆盖。"""
         self._csv_path = csv_path
         _write_header = not os.path.exists(csv_path)
         if not _write_header:
             with open(csv_path, newline="") as f:
-                self._episode_idx = sum(1 for _ in csv.DictReader(f))
+                rows = list(csv.DictReader(f))
+                if rows:
+                    self._episode_idx = max(int(row.get("episode_idx", 0)) for row in rows) + 1
+                else:
+                    self._episode_idx = 0
         else:
             self._episode_idx = 0
         self._csv_fh = open(csv_path, "a", newline="")  # noqa: SIM115
