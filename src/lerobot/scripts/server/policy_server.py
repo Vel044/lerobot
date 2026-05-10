@@ -113,9 +113,13 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy = None                # Policy 子类实例，如 ACTPolicy
 
         # ===== T_infer 统计 CSV =====
-        self._server_csv_path = os.path.expanduser("~/lerobot/analysis/async_server_stats.csv")
+        self._server_csv_path = os.environ.get(
+            "LEROBOT_ASYNC_SERVER_CSV",
+            os.path.expanduser("~/lerobot/analysis/08_async_inference_hold_sweep/async_server_stats.csv"),
+        )
         self._server_csv_header = ["episode_idx", "timestep", "t_infer_s"]
         self._server_episode_idx = 0
+        self._last_timestep = None
         self._init_server_csv()
 
     @property
@@ -599,13 +603,25 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
     # ===== T_infer 统计 CSV 方法 =====
     def _init_server_csv(self):
-        """初始化 server 端 CSV，读取已有行数确定 episode_idx。"""
+        """初始化 server 端 CSV，读取最后一行确定下次写入的 episode_idx。"""
         os.makedirs(os.path.dirname(self._server_csv_path), exist_ok=True)
         _write_header = not os.path.exists(self._server_csv_path)
         if not _write_header:
             with open(self._server_csv_path, newline="") as f:
-                self._server_episode_idx = sum(1 for _ in csv.DictReader(f))
-        # 不断累加，不做 episode 粒度分段；后续合并脚本按 episode_idx 对齐
+                rows = list(csv.DictReader(f))
+                if rows:
+                    episode_values = {int(row.get("episode_idx", 0)) for row in rows}
+                    if len(episode_values) > 1:
+                        self._server_episode_idx = max(episode_values) + 1
+                    else:
+                        self._server_episode_idx = 0
+                        prev_timestep = int(rows[0].get("timestep", -1))
+                        for row in rows[1:]:
+                            timestep = int(row.get("timestep", -1))
+                            if timestep < prev_timestep:
+                                self._server_episode_idx += 1
+                            prev_timestep = timestep
+                    self._last_timestep = int(rows[-1].get("timestep", -1))
         self._server_csv_fh = open(self._server_csv_path, "a", newline="")  # noqa: SIM115
         self._server_csv_writer = csv.DictWriter(self._server_csv_fh, fieldnames=self._server_csv_header)
         if _write_header:
@@ -615,6 +631,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
     def _write_t_infer(self, timestep: int, t_infer_s: float):
         """每次推理完成写入一行 {episode_idx, timestep, t_infer_s}。"""
         try:
+            if self._last_timestep is not None and timestep < self._last_timestep:
+                self._server_episode_idx += 1
+            self._last_timestep = timestep
             self._server_csv_writer.writerow({
                 "episode_idx": self._server_episode_idx,
                 "timestep": str(timestep),

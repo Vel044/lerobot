@@ -200,6 +200,12 @@ class RobotClient:
         self._episode_start_time = None # episode 起始时间
         self._frame_times: list[float] = []  # 每帧完成时间戳，用于算 fps p5/p95
 
+        # ===== stall 事件追踪 =====
+        self._in_stall = False            # 当前是否处于 stall 状态
+        self._stall_start_frame = 0       # 本次 stall 开始的帧号
+        self._stall_start_time = 0.0      # 本次 stall 开始的绝对时间（perf_counter）
+        self._stall_events: list[dict] = []  # 每段连续 stall 记录为一条事件
+
     @property
     def running(self):
         """client 是否仍在运行。shutdown_event.set() 后变为 False，两个线程的 while 循环据此退出。"""
@@ -674,9 +680,22 @@ class RobotClient:
                 with self._stats_lock:
                     self._action_frames += 1
                     self._frame_times.append(time.perf_counter())
+                    # stall 结束：记录刚结束的这段连续 stall
+                    if self._in_stall:
+                        self._in_stall = False
+                        self._stall_events.append({
+                            "start_frame": self._stall_start_frame,
+                            "start_time_s": self._stall_start_time - self._episode_start_time,
+                            "duration_frames": self._total_frames - self._stall_start_frame,
+                            "duration_s": time.perf_counter() - self._stall_start_time,
+                        })
             else:
                 # 队列空 → stall，机器人停住等新 action chunk
                 with self._stats_lock:
+                    if not self._in_stall:
+                        self._in_stall = True
+                        self._stall_start_frame = self._total_frames
+                        self._stall_start_time = time.perf_counter()
                     self._stall_frames += 1
 
             """Control loop: (2) Streaming observations to the remote policy server"""
@@ -792,6 +811,48 @@ class RobotClient:
         except Exception as e:
             self.logger.error(f"Failed to write stats CSV: {e}")
 
+    _STALL_CSV_HEADER = ["episode_idx", "hold", "start_frame", "start_time_s", "duration_frames", "duration_s"]
+
+    def _write_stall_events(self):
+        """把本次 episode 的 stall 事件列表追加写入 CSV。在 episode 结束时调用。"""
+        with self._stats_lock:
+            # 如果 episode 结束时还在 stall，补录最后一段
+            if self._in_stall and self._episode_start_time is not None:
+                self._stall_events.append({
+                    "start_frame": self._stall_start_frame,
+                    "start_time_s": self._stall_start_time - self._episode_start_time,
+                    "duration_frames": self._total_frames - self._stall_start_frame + 1,
+                    "duration_s": time.perf_counter() - self._stall_start_time,
+                })
+                self._in_stall = False
+            events = list(self._stall_events)
+            # 清空列表，防止 stop() 后重复写入
+            self._stall_events = []
+
+        if not events:
+            return
+
+        _stall_csv_path = self._csv_path.replace("async_client_stats.csv", "async_client_stall_events.csv")
+        try:
+            os.makedirs(os.path.dirname(_stall_csv_path), exist_ok=True)
+            _write_header = not os.path.exists(_stall_csv_path)
+            with open(_stall_csv_path, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=self._STALL_CSV_HEADER)
+                if _write_header:
+                    writer.writeheader()
+                for ev in events:
+                    writer.writerow({
+                        "episode_idx": self._episode_idx,
+                        "hold": f"{self._chunk_size_threshold:.4f}",
+                        "start_frame": str(ev["start_frame"]),
+                        "start_time_s": f"{ev['start_time_s']:.3f}",
+                        "duration_frames": str(ev["duration_frames"]),
+                        "duration_s": f"{ev['duration_s']:.3f}",
+                    })
+                f.flush()
+        except Exception as e:
+            self.logger.error(f"Failed to write stall events CSV: {e}")
+
     @staticmethod
     def _read_cpu_temp() -> float:
         """读 CPU 温度(°C)，树莓派 sysfs，失败返回 0.0"""
@@ -849,10 +910,12 @@ def async_client(cfg: RobotClientConfig):
     if client.start():
         client.logger.info("Starting action receiver thread...")
 
-        # 初始化统计 CSV（路径与 record.py 的 timing_stats.csv 同目录）
-        _csv_dir = os.path.expanduser("~/lerobot/analysis")
-        os.makedirs(_csv_dir, exist_ok=True)
-        _csv_path = os.path.join(_csv_dir, "async_client_stats.csv")
+        # 初始化实验 08 统计 CSV；可用环境变量临时覆盖输出位置。
+        _csv_path = os.environ.get(
+            "LEROBOT_ASYNC_CLIENT_CSV",
+            os.path.expanduser("~/lerobot/analysis/08_async_inference_hold_sweep/async_client_stats.csv"),
+        )
+        os.makedirs(os.path.dirname(_csv_path), exist_ok=True)
         client._init_csv(_csv_path)
 
         # daemon=True：主线程退出时后台线程自动终止，不需要手动 join 来保证退出
@@ -870,6 +933,7 @@ def async_client(cfg: RobotClientConfig):
         finally:
             # 退出前最终写入一次统计（success 留 -1，由人工事后填写）
             client._write_stats_row(success=-1)
+            client._write_stall_events()
             client.stop()
             # join() 等后台线程处理完最后一个 action chunk 后退出
             action_receiver_thread.join()

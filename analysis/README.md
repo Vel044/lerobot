@@ -30,6 +30,14 @@ analysis/
 │   ├── run_C_ftrace_delayed.sh      # C 组：ftrace ring buffer，episode 后导出
 │   ├── run_D_ftrace_realtime.sh     # D 组：ftrace + trace_pipe 实时导出
 │   └── raw/                         # strace/ftrace 原始 trace
+├── 08_async_inference_hold_sweep/    # 实验08：异步推理 hold 阈值参数扫描 ✅
+│   ├── async_client_stats.csv
+│   ├── async_server_stats.csv
+│   ├── merge_async_stats.py
+│   ├── plot_async_sweep.py
+│   ├── async_merged_stats.csv
+│   ├── async_hold_summary.csv
+│   └── chart*.png
 └── README.md
 ```
 
@@ -41,9 +49,10 @@ analysis/
 | 02 | 三类任务工作负载对比 | ✅ 已完成（pick/push/classification 各 20 ep） | `so101_act_*_cs100` |
 | 03 | 摄像头感知层级耗时剖析 | ⬜ 设计已完成，待执行 | `so101_act_camprof_*` |
 | 04 | 实验环境与测量工具校准 | ✅ 已完成（A/B/C/D 四组扰动校准） | `tool_overhead_{A,B,C,D}_*` |
+| 08 | 异步推理 hold 阈值参数扫描 | ✅ 已完成（hold=0.3~0.9，各 60s） | `async_client_stats.csv` / `async_server_stats.csv` |
 
 ## 新增实验步骤
 
 1. 在 `timing_stats.csv` 中确认 `model` 命名唯一
 2. 在 `analysis/0N_xxx/` 下新建绘图脚本
-3. 在 `robotdoc/实验数据/0N_xxx/` 下补充实验设计文档和结论
+3. 在 `robotdoc/实验/0N_xxx/` 下补充实验设计文档和结论
