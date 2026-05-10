@@ -101,7 +101,14 @@ def main() -> None:
     args = parser.parse_args()
 
     client = pd.read_csv(args.client_csv).sort_values("hold").reset_index(drop=True)
-    server = pd.read_csv(args.server_csv)
+    # server CSV 可能无 header（policy_server 在文件被删后若进程未重启会漏写 header）
+    with open(args.server_csv, newline="") as f:
+        first_line = f.readline().strip()
+    has_header = not first_line[0].isdigit() if first_line else True
+    if has_header:
+        server = pd.read_csv(args.server_csv)
+    else:
+        server = pd.read_csv(args.server_csv, header=None, names=["episode_idx", "timestep", "t_infer_s"])
 
     mode = args.match_mode
     if mode == "auto":

@@ -111,34 +111,45 @@ def build_summary(
 
 def plot_fps(client: pd.DataFrame, labels: list[str], sync_fps: float, out_png: Path) -> None:
     fig, ax = plt.subplots(figsize=(10, 5))
-    x_async = np.arange(len(client))
-    x_sync = len(client)
-    x_all = np.arange(len(client) + 1)
+    x_async = client["hold"].to_numpy(dtype=float)
+    y_async = client["eff_fps"].to_numpy(dtype=float)
 
-    bars_async = ax.bar(
-        x_async, client["eff_fps"], color=C_ASYNC, width=0.6, label="异步", zorder=2
+    ax.plot(
+        x_async, y_async, color=C_ASYNC, linewidth=2.5, marker="o", markersize=10,
+        markerfacecolor="white", markeredgewidth=2, zorder=3, label="异步实测",
     )
-    ax.bar(x_sync, sync_fps, color=C_SYNC, width=0.6, label="同步 baseline", zorder=2)
-
-    for bar, val in zip(bars_async, client["eff_fps"]):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 0.3,
-            f"{val:.1f}",
-            ha="center",
-            va="bottom",
-            fontsize=10,
+    for x, y in zip(x_async, y_async):
+        ax.annotate(
+            f"{y:.1f}", (x, y), textcoords="offset points",
+            xytext=(0, 12), ha="center", fontsize=10, color=C_ASYNC,
         )
-    ax.text(x_sync + 0.3, sync_fps, f"{sync_fps:.1f}", ha="left", va="bottom", fontsize=10, color=C_SYNC)
 
-    ax.axhline(y=sync_fps, color=C_SYNC, linestyle="--", linewidth=1.5, alpha=0.6, zorder=1)
+    # 二次多项式拟合趋势线
+    coeffs = np.polyfit(x_async, y_async, deg=2)
+    x_fit = np.linspace(min(x_async) - 0.05, max(x_async) + 0.05, 200)
+    y_fit = np.polyval(coeffs, x_fit)
+    y_pred = np.polyval(coeffs, x_async)
+    ss_res = np.sum((y_async - y_pred) ** 2)
+    ss_tot = np.sum((y_async - np.mean(y_async)) ** 2)
+    r2 = 1 - ss_res / ss_tot
+    ax.plot(
+        x_fit, y_fit, color="#D95F02", linewidth=2, linestyle="-.",
+        alpha=0.8, zorder=2, label=f"二次拟合 ($R^2$={r2:.3f})",
+    )
+
+    ax.axhline(y=sync_fps, color=C_SYNC, linestyle="--", linewidth=1.5, alpha=0.35, zorder=1)
+    ax.text(
+        x_async[0] - 0.03, sync_fps + 0.4,
+        f"同步 baseline={sync_fps:.1f}", ha="right", va="bottom",
+        fontsize=10, color=C_SYNC, alpha=0.5,
+    )
+
     ax.set_xlabel("hold (chunk_size_threshold)", fontsize=12)
     ax.set_ylabel("有效 FPS (action_frames / episode_total_s)", fontsize=12)
-    ax.set_title(f"异步推理 hold 扫描：有效 FPS 与同步 baseline 对比（60s/组，baseline={sync_fps:.1f}）", fontsize=13)
-    ax.set_xticks(x_all)
-    ax.set_xticklabels(labels + ["sync"])
-    ax.set_ylim(0, max(client["eff_fps"].max(), sync_fps) * 1.15)
-    ax.legend(fontsize=10)
+    ax.set_title(f"异步推理 hold 扫描：有效 FPS 与同步 baseline 对比（60s/组）", fontsize=13)
+    ax.set_xlim(min(x_async) - 0.08, max(x_async) + 0.03)
+    ax.set_ylim(0, max(y_async.max(), sync_fps) * 1.15)
+    ax.legend(fontsize=10, loc="lower right")
     ax.grid(axis="y", linestyle="--", alpha=0.4, zorder=0)
 
     fig.tight_layout()
@@ -271,7 +282,14 @@ def main() -> None:
 
     _setup_fonts()
     client = pd.read_csv(args.client_csv).sort_values("hold").reset_index(drop=True)
-    server = pd.read_csv(args.server_csv)
+    # server CSV 可能无 header
+    with open(args.server_csv, newline="") as f:
+        first_line = f.readline().strip()
+    has_header = not first_line[0].isdigit() if first_line else True
+    if has_header:
+        server = pd.read_csv(args.server_csv)
+    else:
+        server = pd.read_csv(args.server_csv, header=None, names=["episode_idx", "timestep", "t_infer_s"])
     sync_fps = load_sync_fps(args.sync_csv, args.sync_tag)
 
     client["eff_fps"] = client["action_frames"] / client["episode_total_s"]
